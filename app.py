@@ -1,273 +1,478 @@
-import streamlit as st
-import pandas as pd
+# -*- coding: utf-8 -*-
+"""
+Blue Chip Value Scanner — reconstrucción visual basada en las capturas aportadas.
+Datos de mercado: Yahoo Finance mediante yfinance (fuente no oficial).
+La lista del universo está embebida para evitar el scraping que provocaba HTTP 403.
+"""
+import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
+import pandas as pd
+import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
 from datetime import datetime, timezone
 
-st.set_page_config(page_title="Blue Chip Value Scanner", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="Blue Chip Value Scanner",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+# Universo semilla de grandes compañías estadounidenses. Se conserva localmente:
+# no se consulta Wikipedia ni se descarga la composición de índices en tiempo de ejecución.
+UNIVERSE = [
+("NVDA","NVIDIA","Information Technology"),("MSFT","Microsoft","Information Technology"),
+("AAPL","Apple","Information Technology"),("AMZN","Amazon","Consumer Discretionary"),
+("GOOGL","Alphabet A","Communication Services"),("GOOG","Alphabet C","Communication Services"),
+("META","Meta Platforms","Communication Services"),("AVGO","Broadcom","Information Technology"),
+("BRK-B","Berkshire Hathaway","Financials"),("LLY","Eli Lilly","Health Care"),
+("JPM","JPMorgan Chase","Financials"),("TSLA","Tesla","Consumer Discretionary"),
+("WMT","Walmart","Consumer Staples"),("V","Visa","Financials"),("XOM","Exxon Mobil","Energy"),
+("MA","Mastercard","Financials"),("ORCL","Oracle","Information Technology"),
+("COST","Costco","Consumer Staples"),("JNJ","Johnson & Johnson","Health Care"),
+("NFLX","Netflix","Communication Services"),("PG","Procter & Gamble","Consumer Staples"),
+("HD","Home Depot","Consumer Discretionary"),("ABBV","AbbVie","Health Care"),
+("BAC","Bank of America","Financials"),("CVX","Chevron","Energy"),
+("KO","Coca-Cola","Consumer Staples"),("CRM","Salesforce","Information Technology"),
+("AMD","Advanced Micro Devices","Information Technology"),("MRK","Merck","Health Care"),
+("TMUS","T-Mobile US","Communication Services"),("PEP","PepsiCo","Consumer Staples"),
+("ADBE","Adobe","Information Technology"),("LIN","Linde","Materials"),
+("WFC","Wells Fargo","Financials"),("ACN","Accenture","Information Technology"),
+("CSCO","Cisco Systems","Information Technology"),("MCD","McDonald's","Consumer Discretionary"),
+("IBM","IBM","Information Technology"),("QCOM","Qualcomm","Information Technology"),
+("ABT","Abbott Laboratories","Health Care"),("GE","GE Aerospace","Industrials"),
+("CAT","Caterpillar","Industrials"),("TMO","Thermo Fisher Scientific","Health Care"),
+("DIS","Walt Disney","Communication Services"),("DHR","Danaher","Health Care"),
+("VZ","Verizon","Communication Services"),("INTU","Intuit","Information Technology"),
+("TXN","Texas Instruments","Information Technology"),("AMGN","Amgen","Health Care"),
+("PM","Philip Morris","Consumer Staples"),("NOW","ServiceNow","Information Technology"),
+("NEE","NextEra Energy","Utilities"),("RTX","RTX","Industrials"),
+("SPGI","S&P Global","Financials"),("PFE","Pfizer","Health Care"),
+("UNH","UnitedHealth Group","Health Care"),("GS","Goldman Sachs","Financials"),
+("LOW","Lowe's","Consumer Discretionary"),("HON","Honeywell","Industrials"),
+("ISRG","Intuitive Surgical","Health Care"),("BKNG","Booking Holdings","Consumer Discretionary"),
+("AMAT","Applied Materials","Information Technology"),("BLK","BlackRock","Financials"),
+("AXP","American Express","Financials"),("SYK","Stryker","Health Care"),
+("ETN","Eaton","Industrials"),("PLD","Prologis","Real Estate"),
+("T","AT&T","Communication Services"),("C","Citigroup","Financials"),
+("DE","Deere","Industrials"),("ADP","Automatic Data Processing","Industrials"),
+("MDLZ","Mondelez","Consumer Staples"),("GILD","Gilead Sciences","Health Care"),
+("BMY","Bristol Myers Squibb","Health Care"),("LRCX","Lam Research","Information Technology"),
+("MU","Micron Technology","Information Technology"),("PANW","Palo Alto Networks","Information Technology"),
+("ANET","Arista Networks","Information Technology"),("KLAC","KLA Corporation","Information Technology"),
+("UBER","Uber","Industrials"),("VRTX","Vertex Pharmaceuticals","Health Care"),
+("ADI","Analog Devices","Information Technology"),("CB","Chubb","Financials"),
+("MMC","Marsh & McLennan","Financials"),("SCHW","Charles Schwab","Financials"),
+("SO","Southern Company","Utilities"),("COP","ConocoPhillips","Energy"),
+("BSX","Boston Scientific","Health Care"),("CME","CME Group","Financials"),
+("ICE","Intercontinental Exchange","Financials"),("SHW","Sherwin-Williams","Materials"),
+("REGN","Regeneron","Health Care"),("PGR","Progressive","Financials"),
+("APH","Amphenol","Information Technology"),("SNPS","Synopsys","Information Technology"),
+("CDNS","Cadence Design Systems","Information Technology"),("MCO","Moody's","Financials"),
+("WM","Waste Management","Industrials"),("UPS","United Parcel Service","Industrials"),
+("NKE","Nike","Consumer Discretionary"),("F","Ford Motor","Consumer Discretionary"),
+("GM","General Motors","Consumer Discretionary"),("CMCSA","Comcast","Communication Services"),
+("COF","Capital One","Financials"),("CL","Colgate-Palmolive","Consumer Staples"),
+("EOG","EOG Resources","Energy"),("MDT","Medtronic","Health Care"),
+("CI","The Cigna Group","Health Care"),("ZTS","Zoetis","Health Care"),
+("WELL","Welltower","Real Estate"),("CARR","Carrier Global","Industrials"),
+("EMR","Emerson Electric","Industrials"),("AON","Aon","Financials"),
+("MCK","McKesson","Health Care"),("FDX","FedEx","Industrials"),
+("TT","Trane Technologies","Industrials"),("GD","General Dynamics","Industrials"),
+("NOC","Northrop Grumman","Industrials"),("SLB","SLB","Energy"),
+("MAR","Marriott International","Consumer Discretionary"),("ORLY","O'Reilly Automotive","Consumer Discretionary"),
+("CNI","Canadian National Railway","Industrials"),("AEP","American Electric Power","Utilities"),
+("KMI","Kinder Morgan","Energy"),("PSA","Public Storage","Real Estate"),
+("EQIX","Equinix","Real Estate"),("AFL","Aflac","Financials"),
+("MET","MetLife","Financials"),("TRV","Travelers","Financials"),
+("ROP","Roper Technologies","Industrials"),("CTAS","Cintas","Industrials"),
+("MSI","Motorola Solutions","Information Technology"),("FTNT","Fortinet","Information Technology"),
+("WDAY","Workday","Information Technology"),("CRWD","CrowdStrike","Information Technology"),
+("SNOW","Snowflake","Information Technology"),("APP","AppLovin","Information Technology"),
+("PLTR","Palantir","Information Technology"),("COIN","Coinbase","Financials"),
+("HOOD","Robinhood","Financials"),("DELL","Dell Technologies","Information Technology"),
+("HCA","HCA Healthcare","Health Care"),("ELV","Elevance Health","Health Care"),
+("AIG","American International Group","Financials"),("TGT","Target","Consumer Staples"),
+("SBUX","Starbucks","Consumer Discretionary"),("CMG","Chipotle Mexican Grill","Consumer Discretionary"),
+("ROST","Ross Stores","Consumer Discretionary"),("MAR","Marriott International","Consumer Discretionary"),
+("OXY","Occidental Petroleum","Energy"),("FCX","Freeport-McMoRan","Materials"),
+("NEM","Newmont","Materials"),("ECL","Ecolab","Materials"),
+("ITW","Illinois Tool Works","Industrials"),("PH","Parker-Hannifin","Industrials"),
+("PWR","Quanta Services","Industrials"),("JCI","Johnson Controls","Industrials"),
+("FIS","Fidelity National Information Services","Financials"),("USB","U.S. Bancorp","Financials"),
+("PNC","PNC Financial Services","Financials"),("TFC","Truist Financial","Financials"),
+("A","Agilent Technologies","Health Care"),("BDX","Becton Dickinson","Health Care"),
+("EW","Edwards Lifesciences","Health Care"),("IDXX","IDEXX Laboratories","Health Care"),
+("DXCM","Dexcom","Health Care"),("RMD","ResMed","Health Care"),
+("KDP","Keurig Dr Pepper","Consumer Staples"),("KHC","Kraft Heinz","Consumer Staples"),
+("GIS","General Mills","Consumer Staples"),("K","Kellanova","Consumer Staples"),
+("KR","Kroger","Consumer Staples"),("DLTR","Dollar Tree","Consumer Staples"),
+("EBAY","eBay","Consumer Discretionary"),("ROKU","Roku","Communication Services"),
+("EA","Electronic Arts","Communication Services"),("TTWO","Take-Two Interactive","Communication Services"),
+("WBD","Warner Bros. Discovery","Communication Services"),("CHTR","Charter Communications","Communication Services"),
+("EXC","Exelon","Utilities"),("DUK","Duke Energy","Utilities"),
+("D","Dominion Energy","Utilities"),("XEL","Xcel Energy","Utilities"),
+]
+# De-duplicar conservando orden.
+UNIVERSE = list(dict((x[0], x) for x in UNIVERSE).values())
+UNIVERSE = UNIVERSE[:100]
+META = pd.DataFrame(UNIVERSE, columns=["Ticker","Empresa","Sector"])
+META["Rank S&P"] = np.arange(1, len(META)+1)
+NASDAQ100 = set("NVDA MSFT AAPL AMZN GOOGL GOOG META AVGO TSLA COST NFLX AMD TMUS ADBE CSCO QCOM TXN AMAT LRCX MU PANW ANET KLAC INTU NOW ISRG BKNG ADI SNPS CDNS CRWD WDAY APP PLTR MAR INTC CMCSA MDLZ GILD REGN VRTX ORLY ROST SBUX CMG CHTR EA TTWO WBD".split())
+DOW30 = set("AAPL AMGN AMZN AXP BA CAT CRM CSCO CVX DIS DOW GS HD HON IBM JNJ JPM KO MCD MMM MRK MSFT NKE NVDA PG SHW TRV UNH V VZ WMT".split())
+
+# ---------- Estilo: gradiente nocturno, tarjetas translúcidas y tipografía sans ----------
 st.markdown("""
 <style>
-.block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-[data-testid="stMetric"] {background: rgba(128,128,128,.08); padding: 12px; border-radius: 10px;}
-div[data-testid="stDataFrame"] {border: 1px solid rgba(128,128,128,.2); border-radius: 10px;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.stApp { background: linear-gradient(145deg,#07152c 0%,#10152c 48%,#241044 100%); color:#edf4ff; }
+.block-container { max-width: 1500px; padding-top: 2rem; padding-bottom: 3rem; }
+.hero { padding: 24px 26px 30px; border:1px solid rgba(255,255,255,.18); border-radius:24px;
+ background:linear-gradient(120deg,rgba(29,74,111,.48),rgba(48,22,80,.38));
+ box-shadow:0 24px 60px rgba(0,0,0,.22); position:relative; overflow:hidden; }
+.hero:after { content:""; position:absolute; inset:0; pointer-events:none; opacity:.16;
+ background:repeating-linear-gradient(115deg,transparent 0 90px,rgba(139,207,241,.5) 91px 93px,transparent 94px 170px); }
+.eyebrow { display:inline-block; border:1px solid #8fb6d5; border-radius:30px; padding:8px 16px;
+ background:rgba(255,255,255,.08); font-weight:700; font-size:13px; letter-spacing:.04em; }
+.hero h1 { font-size:clamp(32px,4vw,46px); font-weight:800; margin:26px 0 12px; letter-spacing:-.035em; }
+.hero p { font-size:17px; color:#e3efff; max-width:1050px; line-height:1.55; }
+.stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-top:26px; }
+.stat { min-height:125px; padding:20px; border:1px solid rgba(255,255,255,.3); border-radius:20px;
+ background:rgba(255,255,255,.11); backdrop-filter:blur(12px); box-shadow:0 12px 28px rgba(0,0,0,.14); }
+.stat .icon { font-size:22px; } .stat .num { font-size:34px; font-weight:800; margin-top:6px; }
+.stat .label { font-size:13px; letter-spacing:.04em; }
+.notice { background:#fff; color:#263244; border-left:6px solid #a82b45; border-radius:14px;
+ padding:20px 24px; box-shadow:0 10px 25px rgba(0,0,0,.10); margin:24px 0; }
+.notice h3 { color:#98233d; font-size:18px; margin:0 0 10px; }
+.notice li { margin:5px 0; }
+.section-title { color:#b9dff2; border-left:5px solid #78cddd; padding-left:14px; font-size:24px; font-weight:750; margin-top:32px; }
+.section-copy { color:#e4eaf4; line-height:1.6; }
+div[data-testid="stDataFrame"] { background:#fff; border-radius:12px; }
+div[data-testid="stMetric"] { background:rgba(255,255,255,.10); padding:12px 16px; border-radius:12px; }
+.stButton>button { border-radius:12px; font-weight:700; }
+footer {visibility:hidden;}
+@media(max-width:800px){.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.hero{padding:18px;}}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Blue Chip Value Scanner")
-st.caption("S&P 500 · Nasdaq 100 · Dow Jones | Fundamental value & quality research")
+# ---------- Barra lateral / filtros ----------
+st.sidebar.markdown("## ⚙️ Filtros")
+st.sidebar.caption("Ajusta el universo y el rango de caída.")
+theme = st.sidebar.radio("Apariencia", ["Híbrido","Oscuro","Claro","Auto"], index=0, horizontal=True)
+indices = st.sidebar.multiselect("Índices", ["S&P 500","Nasdaq 100","Dow Jones"], default=["S&P 500"])
+min_cap = st.sidebar.selectbox("Capitalización mínima", ["Todas","10B USD","50B USD","100B USD","200B USD"], index=0)
+max_companies = st.sidebar.slider("Máximo de empresas por actualización", 20, 100, 100, 10)
+st.sidebar.markdown("### Filtro de caída")
+min_drop, max_drop = st.sidebar.slider("Caída desde el pico móvil de 12 meses (%)", -80, 0, (-50,-20), 1)
+sectors = ["Todos"] + sorted(META["Sector"].unique().tolist())
+sector_filter = st.sidebar.selectbox("Sector", sectors, index=0)
+st.sidebar.caption("El universo semilla se mantiene dentro del código para evitar el error HTTP 403 al consultar composiciones externas.")
 
-INDEX_URLS = {
-    "S&P 500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-    "Nasdaq 100": "https://en.wikipedia.org/wiki/Nasdaq-100",
-    "Dow Jones": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
-}
+# Apariencia dinámica sencilla
+if theme == "Claro":
+    st.markdown("<style>.stApp{background:linear-gradient(145deg,#eaf3fb,#f4f5fb 55%,#eee6fa);color:#172033}.hero p,.section-copy{color:#24364b}.hero h1{color:#15243a}.section-title{color:#315e80}</style>", unsafe_allow_html=True)
+elif theme == "Oscuro":
+    st.markdown("<style>.stApp{background:#080d16}</style>", unsafe_allow_html=True)
+
+# ---------- Datos ----------
+@st.cache_data(ttl=21600, show_spinner=False)
+def download_prices(tickers, period="5y"):
+    raw = yf.download(
+        tickers=list(tickers), period=period, interval="1d",
+        auto_adjust=True, group_by="ticker", threads=True,
+        progress=False, timeout=25
+    )
+    return raw
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_universe():
-    frames = []
-    errors = []
+def get_fundamentals(ticker):
+    t = yf.Ticker(ticker)
+    info = t.get_info()
+    # Statements are best-effort: some symbols/accounts may not return them.
     try:
-        t = pd.read_html(INDEX_URLS["S&P 500"])[0]
-        frames.append(pd.DataFrame({"Ticker": t["Symbol"].astype(str).str.replace(".", "-", regex=False),
-                                    "Company": t["Security"].astype(str),
-                                    "Sector": t["GICS Sector"].astype(str),
-                                    "Index": "S&P 500"}))
-    except Exception as e:
-        errors.append("S&P 500: " + str(e)[:140])
-    try:
-        tables = pd.read_html(INDEX_URLS["Nasdaq 100"])
-        found = False
-        for t in tables:
-            cols = [str(c).lower() for c in t.columns]
-            ticker_col = next((c for c in t.columns if "ticker" in str(c).lower() or "symbol" in str(c).lower()), None)
-            name_col = next((c for c in t.columns if "company" in str(c).lower() or "security" in str(c).lower()), None)
-            if ticker_col is not None and name_col is not None:
-                tmp = pd.DataFrame({"Ticker": t[ticker_col].astype(str).str.replace(".", "-", regex=False),
-                                    "Company": t[name_col].astype(str), "Sector": "Not classified",
-                                    "Index": "Nasdaq 100"})
-                frames.append(tmp); found = True; break
-        if not found: errors.append("No se reconoció la tabla del Nasdaq 100.")
-    except Exception as e:
-        errors.append("Nasdaq 100: " + str(e)[:140])
-    try:
-        tables = pd.read_html(INDEX_URLS["Dow Jones"])
-        found = False
-        for t in tables:
-            ticker_col = next((c for c in t.columns if "symbol" in str(c).lower() or "ticker" in str(c).lower()), None)
-            name_col = next((c for c in t.columns if "company" in str(c).lower()), None)
-            if ticker_col is not None and name_col is not None:
-                frames.append(pd.DataFrame({"Ticker": t[ticker_col].astype(str).str.replace(".", "-", regex=False),
-                                            "Company": t[name_col].astype(str), "Sector": "Not classified",
-                                            "Index": "Dow Jones"}))
-                found = True; break
-        if not found: errors.append("No se reconoció la tabla del Dow Jones.")
-    except Exception as e:
-        errors.append("Dow Jones: " + str(e)[:140])
-    if not frames:
-        return pd.DataFrame(), errors
-    data = pd.concat(frames, ignore_index=True)
-    data["Index"] = data.groupby("Ticker")["Index"].transform(lambda x: " + ".join(sorted(set(x))))
-    data = data.drop_duplicates("Ticker").sort_values("Ticker").reset_index(drop=True)
-    return data, errors
-
-def safe_num(obj, key):
-    try:
-        v = obj.get(key)
-        return float(v) if v is not None and np.isfinite(float(v)) else np.nan
+        bs = t.get_balance_sheet(freq="yearly")
     except Exception:
-        return np.nan
+        bs = pd.DataFrame()
+    try:
+        inc = t.get_income_stmt(freq="yearly")
+    except Exception:
+        inc = pd.DataFrame()
+    try:
+        cf = t.get_cashflow(freq="yearly")
+    except Exception:
+        cf = pd.DataFrame()
+    return info, bs, inc, cf
 
-def get_statement_value(df, candidates, column=-1):
+def field(df, names, col=0):
     if df is None or df.empty:
         return np.nan
-    for name in candidates:
+    for name in names:
         if name in df.index:
             try:
-                val = df.loc[name].iloc[column]
-                return float(val) if pd.notna(val) else np.nan
+                return float(df.loc[name].iloc[col])
             except Exception:
                 pass
     return np.nan
 
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_one(ticker):
-    t = yf.Ticker(ticker)
-    try: info = t.get_info()
-    except Exception: info = {}
-    try: inc = t.income_stmt
-    except Exception: inc = pd.DataFrame()
-    try: bs = t.balance_sheet
-    except Exception: bs = pd.DataFrame()
-    try: cf = t.cashflow
-    except Exception: cf = pd.DataFrame()
-    try: hist = t.history(period="1y", auto_adjust=True)
-    except Exception: hist = pd.DataFrame()
+def build_quality(info, bs, inc, cf):
+    checks = []
+    roa = info.get("returnOnAssets")
+    roe = info.get("returnOnEquity")
+    margin = info.get("profitMargins")
+    debt_equity = info.get("debtToEquity")
+    current_ratio = info.get("currentRatio")
+    op_cf = field(cf, ["Operating Cash Flow","OperatingCashFlow"])
+    total_debt = field(bs, ["Total Debt","Long Term Debt And Capital Lease Obligation"])
+    equity = field(bs, ["Stockholders Equity","Total Equity Gross Minority Interest"])
+    checks.extend([
+        bool(roa is not None and roa > 0),
+        bool(op_cf is not np.nan and pd.notna(op_cf) and op_cf > 0),
+        bool(margin is not None and margin > 0),
+        bool(roe is not None and roe > 0),
+        bool(debt_equity is not None and debt_equity < 150),
+        bool(current_ratio is not None and current_ratio >= 1),
+        bool(pd.notna(total_debt) and pd.notna(equity) and equity > total_debt),
+        bool(info.get("grossMargins") is not None and info.get("grossMargins") > 0),
+        ])
+    return int(sum(checks)), len(checks)
 
-    price = safe_num(info, "currentPrice")
-    if not np.isfinite(price) and not hist.empty:
-        price = float(hist["Close"].dropna().iloc[-1])
-    market_cap = safe_num(info, "marketCap")
-    pe = safe_num(info, "trailingPE")
-    fwd_pe = safe_num(info, "forwardPE")
-    ev_ebitda = safe_num(info, "enterpriseToEbitda")
-    p_fcf = safe_num(info, "priceToFreeCashflow")
-    roe = safe_num(info, "returnOnEquity")
-    op_margin = safe_num(info, "operatingMargins")
-    profit_margin = safe_num(info, "profitMargins")
-    debt_equity = safe_num(info, "debtToEquity")
-    sector = info.get("sector", "Not classified")
-    industry = info.get("industry", "Not classified")
-    name = info.get("shortName") or info.get("longName") or ticker
+def load_universe():
+    chosen = set()
+    if "S&P 500" in indices:
+        chosen.update(META["Ticker"].tolist())
+    if "Nasdaq 100" in indices:
+        chosen.update(NASDAQ100)
+    if "Dow Jones" in indices:
+        chosen.update(DOW30)
+    if not chosen:
+        chosen.update(META["Ticker"].tolist())
+    tickers = [x for x in META["Ticker"].tolist() if x in chosen][:max_companies]
+    with st.spinner(f"Descargando hasta {len(tickers)} historiales de precios…"):
+        prices = download_prices(tuple(tickers))
+    if prices is None or prices.empty:
+        raise RuntimeError("El proveedor de precios no devolvió datos. Puede estar limitando temporalmente las consultas.")
+    rows = []
+    for _, m in META[META["Ticker"].isin(tickers)].iterrows():
+        sym = m["Ticker"]
+        try:
+            if isinstance(prices.columns, pd.MultiIndex):
+                if sym in prices.columns.get_level_values(0):
+                    sub = prices[sym]
+                elif sym in prices.columns.get_level_values(1):
+                    sub = prices.xs(sym, axis=1, level=1)
+                else:
+                    sub = pd.DataFrame()
+            else:
+                sub = prices
+            close = sub["Close"].dropna() if "Close" in sub else pd.Series(dtype=float)
+            if len(close) < 30:
+                continue
+            one_year = close.tail(252)
+            peak_idx = one_year.idxmax()
+            last = float(close.iloc[-1])
+            peak = float(one_year.max())
+            drop = (last/peak - 1) * 100 if peak else np.nan
+            days = int((close.index[-1] - peak_idx).days)
+            one_year_return = (last/float(one_year.iloc[0])-1)*100 if one_year.iloc[0] else np.nan
+            # Drawdown and sparkline series are calculated from adjusted daily closes.
+            rows.append({
+                "Ticker":sym,"Empresa":m["Empresa"],"Rank S&P":int(m["Rank S&P"]),
+                "Sector":m["Sector"],"Precio":last,"Caida":drop,"Dias":days,
+                "1 año":one_year_return,"Serie":close.tail(252)
+            })
+        except Exception:
+            continue
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("No se pudo construir la tabla de precios con la respuesta recibida.")
+    return df, prices
 
-    rev_now = get_statement_value(inc, ["Total Revenue", "Operating Revenue"])
-    rev_old = get_statement_value(inc, ["Total Revenue", "Operating Revenue"], column=3)
-    rev_growth_3y = (rev_now / rev_old) ** (1/3) - 1 if rev_now > 0 and rev_old > 0 else np.nan
-    ebitda = get_statement_value(inc, ["EBITDA", "Normalized EBITDA"])
-    total_debt = get_statement_value(bs, ["Total Debt", "Long Term Debt And Capital Lease Obligation"])
-    cash = get_statement_value(bs, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"])
-    net_debt = total_debt - cash if np.isfinite(total_debt) and np.isfinite(cash) else np.nan
-    debt_ebitda = net_debt / ebitda if np.isfinite(net_debt) and np.isfinite(ebitda) and ebitda > 0 else np.nan
-    fcf = get_statement_value(cf, ["Free Cash Flow"])
-    if not np.isfinite(fcf):
-        ocf = get_statement_value(cf, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities"])
-        capex = get_statement_value(cf, ["Capital Expenditure", "Capital Expenditures"])
-        fcf = ocf + capex if np.isfinite(ocf) and np.isfinite(capex) else np.nan
-    fcf_yield = fcf / market_cap if np.isfinite(fcf) and market_cap > 0 else np.nan
+try:
+    data, price_data = load_universe()
+    data = data.sort_values("Caida", ascending=True).reset_index(drop=True)
+    data["Sev."] = np.arange(1, len(data)+1)
+    # Use only available current valuation fields from Yahoo. Values are fetched for candidate names,
+    # not for the entire universe, to reduce rate limiting.
+    candidates = data[(data["Caida"] >= min_drop) & (data["Caida"] <= max_drop)].copy()
+    if sector_filter != "Todos":
+        candidates = candidates[candidates["Sector"] == sector_filter]
+    if min_cap != "Todas":
+        threshold = {"10B USD":10e9,"50B USD":50e9,"100B USD":100e9,"200B USD":200e9}[min_cap]
+        # market cap is checked only where Yahoo returned it.
+        caps = {}
+        for sym in candidates["Ticker"].tolist()[:30]:
+            try: caps[sym] = get_fundamentals(sym)[0].get("marketCap", np.nan)
+            except Exception: caps[sym] = np.nan
+        candidates = candidates[candidates["Ticker"].map(caps).fillna(0) >= threshold]
+except Exception as e:
+    st.markdown('<div class="hero"><span class="eyebrow">SCANNER · VALUE EN CRISIS</span><h1>Blue chips caídas desde su pico</h1><p>Universo de grandes compañías estadounidenses · análisis de caída, valoración y calidad.</p></div>', unsafe_allow_html=True)
+    st.error(f"No fue posible cargar los precios: {e}")
+    st.info("El error HTTP 403 de la composición de índices ya no se genera: el universo está integrado en el proyecto. Si el proveedor de cotizaciones bloquea la descarga, pulsa Actualizar datos más tarde.")
+    st.stop()
 
-    return {
-        "Ticker": ticker, "Empresa": name, "Sector": sector, "Industria": industry,
-        "Precio": price, "Market Cap": market_cap, "P/E": pe, "Forward P/E": fwd_pe,
-        "EV/EBITDA": ev_ebitda, "P/FCF": p_fcf, "FCF Yield": fcf_yield,
-        "ROE": roe, "Margen operativo": op_margin, "Margen neto": profit_margin,
-        "Crec. ingresos 3 años": rev_growth_3y, "Deuda neta/EBITDA": debt_ebitda,
-        "Deuda/Patrimonio": debt_equity, "Histórico 5 años": np.nan,
-        "Histórico disponible": False, "Historial precio": hist,
-    }
+# ---------- Cabecera / KPIs ----------
+mean_drop = candidates["Caida"].mean() if len(candidates) else np.nan
+touched = candidates["Sector"].nunique() if len(candidates) else 0
+updated = datetime.now().strftime("%Y-%m-%d %H:%M")
+st.markdown(f"""
+<div class="hero">
+ <span class="eyebrow">SCANNER · VALUE EN CRISIS</span>
+ <h1>Blue chips caídas desde su pico</h1>
+ <p>Universo: hasta {len(data)} grandes compañías estadounidenses · Filtro: caída {abs(min_drop)}–{abs(max_drop)}% desde el pico móvil de 12 meses, ocurrido en el último año. Actualizado {updated}.</p>
+ <p style="font-size:14px">Scanner de investigación · versión independiente basada en las capturas de referencia</p>
+ <div class="stat-grid">
+  <div class="stat"><div class="icon">🌐</div><div class="num">{len(data)}</div><div class="label">UNIVERSO</div></div>
+  <div class="stat"><div class="icon">◎</div><div class="num">{len(candidates)}</div><div class="label">CANDIDATOS</div></div>
+  <div class="stat"><div class="icon">⬇</div><div class="num">{mean_drop:.0f}%</div><div class="label">CAÍDA MEDIA</div></div>
+  <div class="stat"><div class="icon">▦</div><div class="num">{touched}</div><div class="label">SECTORES TOCADOS</div></div>
+ </div>
+</div>
+""", unsafe_allow_html=True)
 
-def pct_rank(series, higher_is_better=True):
-    s = pd.to_numeric(series, errors="coerce")
-    if s.notna().sum() < 2: return pd.Series(np.nan, index=series.index)
-    return (s.rank(pct=True, ascending=higher_is_better) * 100)
+st.markdown("""
+<div class="notice">
+ <h3>HONESTIDAD ANTE TODO — leer antes de invertir</h3>
+ <ul>
+ <li>Esto es una <b>lista de investigación, NO una recomendación de compra</b>. Una caída por sí sola no es señal suficiente.</li>
+ <li>El universo semilla se mantiene dentro del código; el ranking de referencia es aproximado y no representa una composición oficial histórica del S&amp;P 500.</li>
+ <li>Cruza <b>precio + valoración + calidad</b>. Los datos fundamentales dependen de la cobertura de Yahoo Finance y pueden faltar.</li>
+ <li>La valoración histórica de 5 años y los indicadores de calidad se muestran solo cuando hay datos suficientes; los campos estimados se identifican como aproximaciones.</li>
+ <li>Fuente de precios/fundamentales: Yahoo Finance mediante yfinance, una interfaz no oficial que puede limitar o cambiar sus respuestas.</li>
+ </ul>
+</div>
+""", unsafe_allow_html=True)
 
-def score_data(df):
-    out = df.copy()
-    # Valuation: cheaper multiples and higher free-cash-flow yield score better.
-    val_parts = []
-    for col, high_good in [("P/E", False), ("Forward P/E", False), ("EV/EBITDA", False),
-                           ("P/FCF", False), ("FCF Yield", True)]:
-        s = out[col].where(out[col] > 0) if col != "FCF Yield" else out[col]
-        val_parts.append(pct_rank(s, high_good).rename(col))
-    out["Puntuación valoración"] = pd.concat(val_parts, axis=1).mean(axis=1)
-    # Quality: profitability and cash generation; no ROIC estimate is fabricated.
-    q_parts = [pct_rank(out[c], True) for c in ["ROE", "Margen operativo", "Margen neto"]]
-    q_parts.append(out["FCF Yield"].gt(0).astype(float) * 100)
-    out["Puntuación calidad"] = pd.concat(q_parts, axis=1).mean(axis=1)
-    out["Puntuación crecimiento"] = pct_rank(out["Crec. ingresos 3 años"], True)
-    # Lower net debt/EBITDA is preferable. Negative net debt is allowed and rewarded.
-    out["Puntuación riesgo"] = pct_rank(out["Deuda neta/EBITDA"], False)
-    weights = {"Puntuación valoración": .35, "Puntuación calidad": .35,
-               "Puntuación crecimiento": .20, "Puntuación riesgo": .10}
-    out["Score"] = sum(out[k] * w for k, w in weights.items())
-    def verdict(x):
-        if pd.isna(x): return "Datos insuficientes"
-        if x >= 85: return "Oportunidad potencial"
-        if x >= 70: return "Atractiva"
-        if x >= 55: return "Razonable"
-        if x >= 40: return "Cara"
-        return "Muy cara / revisar"
-    out["Veredicto"] = out["Score"].apply(verdict)
-    return out
+st.markdown('<div class="section-title">Vista RADAR — candidatos para investigar</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-copy">Uno por uno. Orden inicial por severidad. Haz clic en cualquier encabezado para ordenar. <b>Valuación: vs Ind.</b> = P/E frente a la mediana de su sector; <b>vs Hist.</b> = percentil histórico solo si se puede calcular; <b>Valor</b> = score relativo; <b>Calidad</b> = indicadores fundamentales disponibles. ≈ = datos de proveedor externo.</div>', unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Filtros")
-    selected_index = st.multiselect("Índices", ["S&P 500", "Nasdaq 100", "Dow Jones"],
-                                    default=["S&P 500", "Nasdaq 100", "Dow Jones"])
-    min_cap = st.selectbox("Capitalización mínima", ["Todas", "US$10B", "US$50B", "US$100B"], index=0)
-    max_scan = st.slider("Máximo de empresas por actualización", 10, 100, 30, 10)
-    refresh = st.button("↻ Actualizar datos", use_container_width=True)
-    if refresh:
-        st.cache_data.clear()
+c1,c2,c3 = st.columns([2,1,1])
+with c1:
+    sector2 = st.selectbox("Sector", ["Todos los sectores"] + sorted(candidates["Sector"].unique().tolist()), key="sector_table")
+with c2:
+    if st.button("↻ Reset"):
         st.rerun()
+with c3:
+    visible_count = len(candidates[candidates["Sector"] == sector2]) if sector2 != "Todos los sectores" else len(candidates)
+    st.markdown(f"<div style='text-align:right;padding-top:30px;color:#e9eef6'>mostrando {visible_count} de {len(candidates)}</div>", unsafe_allow_html=True)
+if sector2 != "Todos los sectores":
+    candidates = candidates[candidates["Sector"] == sector2].copy()
 
-universe, errors = load_universe()
-if universe.empty:
-    st.error("No fue posible cargar la composición de los índices. Comprueba la conexión y vuelve a intentar.")
-    for e in errors: st.caption(e)
-    st.stop()
-
-chosen = universe[universe["Index"].apply(lambda x: any(i in x for i in selected_index))]
-sector_options = sorted([x for x in chosen["Sector"].dropna().unique() if x != "Not classified"])
-sector_filter = st.sidebar.multiselect("Sectores", sector_options)
-if sector_filter:
-    chosen = chosen[chosen["Sector"].isin(sector_filter)]
-if chosen.empty:
-    st.warning("No hay empresas para los filtros seleccionados.")
-    st.stop()
-
-st.caption(f"Universo detectado: {len(universe)} tickers únicos · Selección actual: {len(chosen)}")
-if errors:
-    with st.expander("Avisos de carga del universo"):
-        for e in errors: st.write("• " + e)
-
-tickers = chosen["Ticker"].head(max_scan).tolist()
-st.info(f"Esta primera versión analiza hasta {len(tickers)} empresas por ejecución para respetar los límites de las fuentes gratuitas. Puedes ampliar el lote en el panel lateral.")
-
-records = []
-progress = st.progress(0, text="Consultando datos financieros…")
-for i, ticker in enumerate(tickers):
+# Fundamentals: try for candidates (bounded) to build valuation and quality scores.
+fund_rows = []
+progress = st.progress(0, text="Preparando métricas fundamentales…")
+for i, (_, row) in enumerate(candidates.iterrows()):
+    sym = row["Ticker"]
     try:
-        records.append(fetch_one(ticker))
+        info, bs, inc, cf = get_fundamentals(sym)
+        pe = info.get("trailingPE")
+        fcf = info.get("freeCashflow")
+        mcap = info.get("marketCap")
+        fcf_yield = (fcf/mcap*100) if fcf is not None and mcap and mcap > 0 else np.nan
+        fscore, nscore = build_quality(info, bs, inc, cf)
+        fund_rows.append({"Ticker":sym,"P/E":pe,"FCF Yield":fcf_yield,"F-score":fscore,
+                          "F-count":nscore,"Market Cap":mcap,"Info":info})
     except Exception:
-        pass
-    progress.progress((i + 1) / len(tickers), text=f"Analizando {ticker} ({i+1}/{len(tickers)})")
+        fund_rows.append({"Ticker":sym,"P/E":np.nan,"FCF Yield":np.nan,"F-score":np.nan,
+                          "F-count":0,"Market Cap":np.nan,"Info":{}})
+    progress.progress((i+1)/max(1,len(candidates)), text=f"Consultando fundamentos: {i+1}/{len(candidates)}")
 progress.empty()
-
-if not records:
-    st.error("No se recibieron datos financieros. Intenta más tarde o reduce el número de empresas.")
-    st.stop()
-
-df = pd.DataFrame(records)
-df = score_data(df)
-if min_cap != "Todas":
-    threshold = {"US$10B": 10e9, "US$50B": 50e9, "US$100B": 100e9}[min_cap]
-    df = df[df["Market Cap"] >= threshold]
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Empresas analizadas", len(df))
-c2.metric("Con score calculable", int(df["Score"].notna().sum()))
-c3.metric("Atractivas o mejores", int(df["Score"].ge(70).sum()))
-c4.metric("Datos consultados", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-
-st.subheader("Radar de oportunidades")
-display_cols = ["Ticker", "Empresa", "Sector", "Precio", "P/E", "Forward P/E", "EV/EBITDA",
-                "FCF Yield", "ROE", "Margen operativo", "Crec. ingresos 3 años",
-                "Deuda neta/EBITDA", "Puntuación valoración", "Puntuación calidad",
-                "Puntuación crecimiento", "Puntuación riesgo", "Score", "Veredicto"]
-fmt = {c: (lambda x: f"{x:.1%}") for c in ["FCF Yield", "ROE", "Margen operativo", "Crec. ingresos 3 años"]}
-fmt.update({c: (lambda x: f"{x:.1f}") for c in ["P/E", "Forward P/E", "EV/EBITDA", "Deuda neta/EBITDA",
-                                                "Puntuación valoración", "Puntuación calidad",
-                                                "Puntuación crecimiento", "Puntuación riesgo", "Score"]})
-st.dataframe(df[display_cols].sort_values("Score", ascending=False),
-             use_container_width=True, hide_index=True, column_config={
-                 "Precio": st.column_config.NumberColumn(format="$%.2f"),
-                 "Market Cap": st.column_config.NumberColumn(format="$%.0f"),
+fund = pd.DataFrame(fund_rows)
+if fund.empty:
+    fund = pd.DataFrame(columns=["Ticker","P/E","FCF Yield","F-score","F-count","Market Cap","Info"])
+view = candidates.merge(fund.drop(columns=["Info"], errors="ignore"), on="Ticker", how="left")
+# Sector median P/E; comparisons are only shown if there are enough valid peers.
+sector_pe = view.groupby("Sector")["P/E"].transform("median")
+view["vs Ind."] = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
+                            (view["P/E"]/sector_pe-1)*100, np.nan)
+# A transparent relative score: drawdown + discount to sector + F-score + FCF yield.
+pe_discount = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
+                       np.clip((sector_pe-view["P/E"])/sector_pe*100,-100,100), 0)
+quality_norm = view["F-score"].fillna(4)/8*100
+fcf_norm = view["FCF Yield"].clip(-10,20).fillna(0)
+view["Valor"] = (0.45*(100+view["Caida"].clip(-80,0))/80*100 +
+                 0.30*(pe_discount+100)/2 + 0.20*quality_norm +
+                 0.05*((fcf_norm+10)/30*100)).clip(0,100)
+view["Veredicto"] = np.select(
+    [view["Valor"]>=70, view["Valor"]>=55, view["Valor"]>=40],
+    ["barata de verdad","algo barata","en precio"], default="cara / revisar"
+)
+view["Calidad"] = view.apply(
+    lambda r: ("sana" if pd.notna(r["F-score"]) and r["F-score"]>=6 else
+               "aceptable" if pd.notna(r["F-score"]) and r["F-score"]>=4 else
+               "frágil" if pd.notna(r["F-score"]) else "sin datos") +
+              (f" · F{int(r['F-score'])}" if pd.notna(r["F-score"]) else ""), axis=1)
+view["vs Hist."] = "—"
+view["Precio"] = view["Precio"].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
+view["Caida"] = view["Caida"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+view["vs Ind."] = view["vs Ind."].map(lambda x: f"{x:+.0f}%" if pd.notna(x) else "—")
+view["Valor"] = view["Valor"].map(lambda x: f"{x:+.2f}" if pd.notna(x) else "—")
+view["1 año"] = view["1 año"].map(lambda x: f"{x:+.1f}%" if pd.notna(x) else "—")
+display_cols = ["Ticker","Empresa","Rank S&P","Sector","Precio","Caida","Dias","Sev.","1 año","vs Ind.","vs Hist.","Valor","Veredicto","Calidad"]
+table = view[display_cols].rename(columns={"Ticker":"Símbolo","Caida":"Caída","Dias":"Días","Sev.":"Sev."})
+table.insert(table.columns.get_loc("1 año")+1, "Evolución 1 año", view["Serie"].apply(lambda s: list(pd.Series(s).tail(60).round(2))))
+st.dataframe(table, use_container_width=True, hide_index=True, height=540,
+             column_config={
+                 "Símbolo":st.column_config.TextColumn("Ticker",width="small"),
+                 "Empresa":st.column_config.TextColumn("Empresa",width="medium"),
+                 "Rank S&P":st.column_config.NumberColumn("Rank S&P",format="#%d"),
+                 "Caída":st.column_config.TextColumn("Caída",width="small"),
+                 "Calidad":st.column_config.TextColumn("Calidad",width="medium"),
+                 "Veredicto":st.column_config.TextColumn("Veredicto",width="medium"),
+                 "Evolución 1 año":st.column_config.LineChartColumn("1 año",width="large"),
              })
+csv = view[display_cols].to_csv(index=False).encode("utf-8-sig")
+st.download_button("⬇ Exportar radar a CSV", data=csv, file_name="blue_chip_value_radar.csv", mime="text/csv")
 
-csv = df[display_cols].to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Descargar resultados CSV", csv, "blue_chip_value_scanner.csv", "text/csv")
+# ---------- Ficha detallada y chart ----------
+st.markdown('<div class="section-title">Ficha de empresa — precio, valoración y calidad</div>', unsafe_allow_html=True)
+symbols = view["Ticker"].tolist()
+if symbols:
+    selected = st.selectbox("Selecciona una empresa", symbols, format_func=lambda s: f"{s} · {META.loc[META.Ticker.eq(s),'Empresa'].iloc[0]}")
+    r = view[view["Ticker"]==selected].iloc[0]
+    raw_info = next((x["Info"] for x in fund_rows if x["Ticker"]==selected), {})
+    a,b,c,d = st.columns(4)
+    a.metric("Precio", f"${r['Precio']}")
+    b.metric("Caída desde pico", f"{r['Caida']}")
+    c.metric("P/E trailing", f"{r['P/E']:.1f}x" if pd.notna(r["P/E"]) else "N/D")
+    d.metric("FCF yield", f"{r['FCF Yield']:.1f}%" if pd.notna(r["FCF Yield"]) else "N/D")
+    # Plot 1-year close series
+    series = r["Serie"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines", name=selected,
+                             line=dict(color="#67b7e8",width=2), fill="tozeroy",
+                             fillcolor="rgba(103,183,232,.16)"))
+    peakdate = series.idxmax()
+    fig.add_trace(go.Scatter(x=[peakdate], y=[series.max()], mode="markers",
+                             marker=dict(color="#e84d70",size=9), name="Pico 12m"))
+    fig.update_layout(height=340, margin=dict(l=10,r=10,t=20,b=10),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(255,255,255,.04)",
+                      font=dict(color="#eaf2fb"), xaxis_title="", yaxis_title="USD",
+                      legend=dict(orientation="h",y=1.08))
+    st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Ver datos fundamentales disponibles"):
+        safe = {k:v for k,v in raw_info.items() if k in [
+            "sector","industry","marketCap","trailingPE","forwardPE","priceToBook",
+            "returnOnAssets","returnOnEquity","profitMargins","grossMargins",
+            "debtToEquity","currentRatio","freeCashflow","operatingCashflow",
+            "revenueGrowth","earningsGrowth","dividendYield"]}
+        st.json(safe)
+else:
+    st.info("No hay candidatos con los filtros seleccionados.")
 
-st.subheader("Ficha de empresa")
-selected_ticker = st.selectbox("Selecciona una acción", df["Ticker"].tolist())
-row = df[df["Ticker"] == selected_ticker].iloc[0]
-st.markdown(f"### {row['Empresa']} ({selected_ticker})")
-a, b, c, d = st.columns(4)
-a.metric("Score compuesto", "N/D" if pd.isna(row["Score"]) else f"{row['Score']:.1f}/100")
-b.metric("P/E", "N/D" if pd.isna(row["P/E"]) else f"{row['P/E']:.1f}x")
-c.metric("FCF Yield", "N/D" if pd.isna(row["FCF Yield"]) else f"{row['FCF Yield']:.1%}")
-d.metric("ROE", "N/D" if pd.isna(row["ROE"]) else f"{row['ROE']:.1%}")
-hist = row["Historial precio"]
-if hist is not None and not hist.empty:
-    st.line_chart(hist["Close"], height=220)
-st.warning("El percentil histórico de múltiplos a 5 años y el descuento frente a la industria aún no se muestran: requieren series históricas y comparables sectoriales consistentes. No se sustituyen por estimaciones inventadas.")
-st.caption("Uso educativo e investigativo. Datos de terceros pueden tener retrasos, errores o restricciones de uso. Verifica cada cifra en los informes oficiales antes de invertir.")
+st.markdown("""
+<div class="notice">
+ <h3>Metodología y límites</h3>
+ <ul>
+ <li><b>Caída:</b> último cierre ajustado frente al máximo de los últimos 252 cierres disponibles. “Días” es el tiempo calendario desde ese máximo.</li>
+ <li><b>vs Ind.:</b> P/E trailing de la empresa frente a la mediana de P/E del sector dentro de los candidatos que devolvieron datos; no es una comparación completa con todos los pares.</li>
+ <li><b>Valor:</b> puntuación heurística propia que combina caída, descuento sectorial, calidad fundamental y FCF yield. No es una recomendación ni un modelo validado.</li>
+ <li><b>Calidad:</b> proxy de ocho comprobaciones disponibles; no equivale al Piotroski F-Score oficial. La valoración histórica de cinco años no se calcula en esta versión porque no se dispone de series históricas consistentes de fundamentales.</li>
+ <li><b>Sesgo de supervivencia:</b> el universo contiene compañías vigentes; no incluye empresas que salieron del índice o quebraron.</li>
+ </ul>
+</div>
+""", unsafe_allow_html=True)
+st.caption("Blue Chip Value Scanner · herramienta educativa de investigación · no constituye asesoría financiera.")
