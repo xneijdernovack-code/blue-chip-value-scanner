@@ -13,6 +13,10 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from streamlit_autorefresh import st_autorefresh
+
+BUILD_VERSION = "v2.2 · 06 NOV 2026"
 
 st.set_page_config(
     page_title="Blue Chip Value Scanner",
@@ -20,6 +24,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st_autorefresh(interval=5 * 60 * 1000, key="bluechip_market_refresh")
 
 # Universo semilla de grandes compañías estadounidenses. Se conserva localmente:
 # no se consulta Wikipedia ni se descarga la composición de índices en tiempo de ejecución.
@@ -168,6 +173,30 @@ div[data-testid="stDataFrame"] { background:#fff; border-radius:12px; }
 @media(max-width:850px){.fund-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
 div[data-testid="stMetric"] { background:rgba(255,255,255,.10); padding:12px 16px; border-radius:12px; }
 .stButton>button { border-radius:12px; font-weight:700; }
+
+.radar-note {font-size:14px;line-height:1.72;color:#e6eef8;margin:0 0 26px 0}
+.radar-toolbar-label {font-size:17px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#eaf4ff;padding-bottom:11px}
+.radar-wrap {height:720px;max-height:78vh;overflow:auto;scrollbar-color:#647d99 #101722}
+.radar-table {min-width:1650px;table-layout:fixed}
+.radar-table th {position:sticky;top:0;z-index:5;padding:16px 12px;font-size:13px;font-weight:800}
+.radar-table td {padding:16px 12px;height:88px}
+.radar-table th:first-child,.radar-table td:first-child {position:sticky;left:0;z-index:7;width:52px;min-width:52px;max-width:52px;text-align:center;background:#142131}
+.radar-table th:nth-child(2),.radar-table td:nth-child(2) {position:sticky;left:52px;z-index:6;width:245px;min-width:245px;max-width:245px;background:#142131;box-shadow:7px 0 10px rgba(0,0,0,.18)}
+.radar-table tbody tr:nth-child(even) td:first-child,.radar-table tbody tr:nth-child(even) td:nth-child(2){background:#172536}
+.radar-company {display:flex;align-items:center;gap:11px;min-width:0}
+.radar-logo {width:36px;height:36px;min-width:36px;border-radius:50%;background:#eef4fb;object-fit:contain;padding:3px}
+.radar-monogram {width:36px;height:36px;min-width:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(140deg,#406b92,#664a8d);font-size:12px;font-weight:800;color:white}
+.radar-company-text {min-width:0;white-space:normal}
+.radar-ticker {font-size:15px;font-weight:800;color:#8fc8f5;line-height:1.3}
+.radar-name {font-size:12px;color:#d3dce8;margin-top:4px;line-height:1.25}
+.radar-pill {display:inline-block;padding:6px 11px;border-radius:9px;font-size:12px;font-weight:800;white-space:nowrap}
+.verdict-cheap,.quality-healthy {background:#d9f3df;color:#24623b}
+.verdict-some,.quality-acceptable {background:#dce8f4;color:#315a7b}
+.verdict-fair {background:#e7e9ed;color:#555f6a}
+.verdict-expensive,.quality-trap {background:#f5dce5;color:#87334d}
+.quality-fragile {background:#f8e8c9;color:#80551e}
+.spark {width:245px;height:58px;display:block}
+
 footer {visibility:hidden;}
 @media(max-width:800px){.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.hero{padding:18px;}}
 </style>
@@ -193,14 +222,53 @@ elif theme == "Oscuro":
     st.markdown("<style>.stApp{background:#080d16}</style>", unsafe_allow_html=True)
 
 # ---------- Datos ----------
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def download_prices(tickers, period="5y"):
-    raw = yf.download(
-        tickers=list(tickers), period=period, interval="1d",
-        auto_adjust=True, group_by="ticker", threads=True,
-        progress=False, timeout=25
-    )
-    return raw
+    """Descarga por lotes de 15 símbolos para reducir errores de Yahoo."""
+    result = {}
+    tickers = list(tickers)
+    for start in range(0, len(tickers), 15):
+        batch = tickers[start:start + 15]
+        raw = pd.DataFrame()
+        for attempt in range(2):
+            try:
+                raw = yf.download(
+                    tickers=batch, period=period, interval="1d",
+                    auto_adjust=True, group_by="ticker", threads=False,
+                    progress=False, timeout=35
+                )
+                if raw is not None and not raw.empty:
+                    break
+            except Exception:
+                raw = pd.DataFrame()
+        if raw is None or raw.empty:
+            continue
+        for sym in batch:
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if sym in raw.columns.get_level_values(0):
+                        part = raw[sym].copy()
+                    elif sym in raw.columns.get_level_values(1):
+                        part = raw.xs(sym, axis=1, level=1).copy()
+                    else:
+                        continue
+                elif len(batch) == 1:
+                    part = raw.copy()
+                else:
+                    continue
+                if "Close" in part.columns and part["Close"].notna().sum() >= 30:
+                    result[sym] = part
+            except Exception:
+                continue
+    return result
+
+@st.cache_data(ttl=300, show_spinner=False)
+def download_one_history(ticker, period="5y"):
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
+        return hist if hist is not None else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fundamentals(ticker):
@@ -265,45 +333,37 @@ def load_universe():
     if not chosen:
         chosen.update(META["Ticker"].tolist())
     tickers = [x for x in META["Ticker"].tolist() if x in chosen][:max_companies]
-    with st.spinner(f"Descargando hasta {len(tickers)} historiales de precios…"):
-        prices = download_prices(tuple(tickers))
-    if prices is None or prices.empty:
-        raise RuntimeError("El proveedor de precios no devolvió datos. Puede estar limitando temporalmente las consultas.")
+    with st.spinner(f"Descargando cotizaciones por lotes para hasta {len(tickers)} empresas…"):
+        histories = download_prices(tuple(tickers))
     rows = []
     for _, m in META[META["Ticker"].isin(tickers)].iterrows():
         sym = m["Ticker"]
         try:
-            if isinstance(prices.columns, pd.MultiIndex):
-                if sym in prices.columns.get_level_values(0):
-                    sub = prices[sym]
-                elif sym in prices.columns.get_level_values(1):
-                    sub = prices.xs(sym, axis=1, level=1)
-                else:
-                    sub = pd.DataFrame()
-            else:
-                sub = prices
-            close = sub["Close"].dropna() if "Close" in sub else pd.Series(dtype=float)
+            sub = histories.get(sym, pd.DataFrame())
+            if sub is None or sub.empty or "Close" not in sub.columns:
+                continue
+            close = sub["Close"].dropna()
             if len(close) < 30:
                 continue
             one_year = close.tail(252)
             peak_idx = one_year.idxmax()
             last = float(close.iloc[-1])
             peak = float(one_year.max())
-            drop = (last/peak - 1) * 100 if peak else np.nan
+            drop = (last / peak - 1) * 100 if peak else np.nan
             days = int((close.index[-1] - peak_idx).days)
-            one_year_return = (last/float(one_year.iloc[0])-1)*100 if one_year.iloc[0] else np.nan
-            # Drawdown and sparkline series are calculated from adjusted daily closes.
+            one_year_return = (last / float(one_year.iloc[0]) - 1) * 100 if one_year.iloc[0] else np.nan
+            hist_pct = float((close <= last).mean() * 100)
             rows.append({
-                "Ticker":sym,"Empresa":m["Empresa"],"Rank S&P":int(m["Rank S&P"]),
-                "Sector":m["Sector"],"Precio":last,"Caida":drop,"Dias":days,
-                "1 año":one_year_return,"Serie":close.tail(252)
+                "Ticker": sym, "Empresa": m["Empresa"], "Rank S&P": int(m["Rank S&P"]),
+                "Sector": m["Sector"], "Precio": last, "Caida": drop, "Dias": days,
+                "1 año": one_year_return, "Serie": close, "HistPct": hist_pct
             })
         except Exception:
             continue
     df = pd.DataFrame(rows)
     if df.empty:
-        raise RuntimeError("No se pudo construir la tabla de precios con la respuesta recibida.")
-    return df, prices
+        raise RuntimeError("Yahoo Finance no devolvió historiales utilizables. Prueba más tarde; el proveedor puede limitar consultas temporalmente.")
+    return df, histories
 
 try:
     data, price_data = load_universe()
@@ -331,15 +391,15 @@ except Exception as e:
 # ---------- Cabecera / KPIs ----------
 mean_drop = candidates["Caida"].mean() if len(candidates) else np.nan
 touched = candidates["Sector"].nunique() if len(candidates) else 0
-updated = datetime.now().strftime("%Y-%m-%d %H:%M")
+updated = datetime.now(ZoneInfo("America/Bogota")).strftime("%Y-%m-%d %H:%M")
 st.markdown(f"""
 <div class="hero">
  <span class="eyebrow">SCANNER · VALUE EN CRISIS</span>
  <h1>Blue chips caídas desde su pico</h1>
- <p>Universo: hasta {len(data)} grandes compañías estadounidenses · Filtro: caída {abs(min_drop)}–{abs(max_drop)}% desde el pico móvil de 12 meses, ocurrido en el último año. Actualizado {updated}.</p>
- <p style="font-size:14px">Scanner de investigación · versión independiente basada en las capturas de referencia</p>
+ <p>Universo: {len(META)} compañías; cotizaciones disponibles {len(data)}/{len(META)} · Filtro: caída {abs(min_drop)}–{abs(max_drop)}% desde el pico móvil de 12 meses, ocurrido en el último año. Actualizado {updated}.</p>
+ <p style="font-size:14px">Scanner de investigación · versión {BUILD_VERSION} · datos externos sujetos a disponibilidad</p>
  <div class="stat-grid">
-  <div class="stat"><div class="icon">🌐</div><div class="num">{len(data)}</div><div class="label">UNIVERSO</div></div>
+  <div class="stat"><div class="icon">🌐</div><div class="num">{len(META)}</div><div class="label">UNIVERSO</div><div style="font-size:11px;opacity:.78;margin-top:5px">{len(data)} con cotización</div></div>
   <div class="stat"><div class="icon">◎</div><div class="num">{len(candidates)}</div><div class="label">CANDIDATOS</div></div>
   <div class="stat"><div class="icon">⬇</div><div class="num">{mean_drop:.0f}%</div><div class="label">CAÍDA MEDIA</div></div>
   <div class="stat"><div class="icon">▦</div><div class="num">{touched}</div><div class="label">SECTORES TOCADOS</div></div>
@@ -361,17 +421,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="section-title">Vista RADAR — candidatos para investigar</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-copy">Uno por uno. Orden inicial por severidad. Haz clic en cualquier encabezado para ordenar. <b>Valuación: vs Ind.</b> = P/E frente a la mediana de su sector; <b>vs Hist.</b> = percentil histórico solo si se puede calcular; <b>Valor</b> = score relativo; <b>Calidad</b> = indicadores fundamentales disponibles. ≈ = datos de proveedor externo.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="radar-note"><b>Uno por uno. Orden inicial por severidad.</b> '
+    'Haz clic en cualquier encabezado para ordenar (<b>otro clic invierte</b>). '
+    '<b>Valuación: vs Ind.</b> = P/E frente a la mediana de su industria '
+    '(negativo = más barata que sus pares); <b>vs Hist.</b> = percentil del precio actual frente a sus propios cierres de cinco años '
+    '(bajo = zona más baja de su historial); <b>Valor</b> = score compuesto (alto = más barata según este modelo); '
+    '<b>Calidad</b> = anti-trampa (sana / aceptable / frágil / posible trampa; pasa el cursor por la etiqueta para ver las comprobaciones). '
+    '≈ = datos de proveedor externo.</div>', unsafe_allow_html=True)
 
-c1,c2,c3 = st.columns([2,1,1])
-with c1:
-    sector2 = st.selectbox("Sector", ["Todos los sectores"] + sorted(candidates["Sector"].unique().tolist()), key="sector_table")
-with c2:
-    if st.button("↻ Reset"):
-        st.rerun()
-with c3:
-    visible_count = len(candidates[candidates["Sector"] == sector2]) if sector2 != "Todos los sectores" else len(candidates)
-    st.markdown(f"<div style='text-align:right;padding-top:30px;color:#e9eef6'>mostrando {visible_count} de {len(candidates)}</div>", unsafe_allow_html=True)
+f1, f2, f3 = st.columns([0.10, 0.34, 0.56], vertical_alignment="bottom")
+with f1:
+    st.markdown('<div class="radar-toolbar-label">SECTOR</div>', unsafe_allow_html=True)
+with f2:
+    sector2 = st.selectbox("Sector", ["Todos los sectores"] + sorted(candidates["Sector"].unique().tolist()), key="sector_table", label_visibility="collapsed")
+with f3:
+    b1, b2 = st.columns([0.18, 0.82], vertical_alignment="bottom")
+    with b1:
+        if st.button("↻ Reset", key="radar_reset"):
+            st.rerun()
+    with b2:
+        visible_count = len(candidates[candidates["Sector"] == sector2]) if sector2 != "Todos los sectores" else len(candidates)
+        st.markdown(f"<div style='text-align:right;padding:10px 4px;color:#e9eef6'>mostrando {visible_count} de {len(candidates)}</div>", unsafe_allow_html=True)
 if sector2 != "Todos los sectores":
     candidates = candidates[candidates["Sector"] == sector2].copy()
 
@@ -412,14 +483,25 @@ view["Valor"] = (0.45*(100+view["Caida"].clip(-80,0))/80*100 +
                  0.05*((fcf_norm+10)/30*100)).clip(0,100)
 view["Veredicto"] = np.select(
     [view["Valor"]>=70, view["Valor"]>=55, view["Valor"]>=40],
-    ["barata de verdad","algo barata","en precio"], default="cara / revisar"
+    ["barata de verdad","algo barata","en precio"], default="cara (cayó, pero cara)"
 )
-view["Calidad"] = view.apply(
-    lambda r: ("sana" if pd.notna(r["F-score"]) and r["F-score"]>=6 else
-               "aceptable" if pd.notna(r["F-score"]) and r["F-score"]>=4 else
-               "frágil" if pd.notna(r["F-score"]) else "sin datos") +
-              (f" · F{int(r['F-score'])}" if pd.notna(r["F-score"]) else ""), axis=1)
-view["vs Hist."] = "—"
+def quality_label(score):
+    if pd.isna(score):
+        return "sin datos"
+    score = int(score)
+    if score >= 7:
+        label = "sana"
+    elif score >= 5:
+        label = "aceptable"
+    elif score >= 3:
+        label = "frágil"
+    else:
+        label = "posible trampa"
+    return f"{label} · F{score}"
+
+view["Calidad"] = view["F-score"].apply(quality_label)
+# Percentil del precio actual frente a la serie de cierres ajustados descargada (hasta cinco años).
+view["vs Hist."] = view["HistPct"].apply(lambda x: f"p{int(round(float(x)/10)*10)}" if pd.notna(x) else "—")
 view["Precio"] = view["Precio"].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
 view["Caida"] = view["Caida"].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
 view["vs Ind."] = view["vs Ind."].map(lambda x: f"{x:+.0f}%" if pd.notna(x) else "—")
@@ -441,46 +523,143 @@ def _sparkline(values, color="#39c98b"):
     return f'<svg class="spark" viewBox="0 0 230 52" preserveAspectRatio="none"><polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 html_rows=[]
-for _, rr in view.iterrows():
+info_by_ticker = {x["Ticker"]: x.get("Info", {}) for x in fund_rows}
+
+def _company_logo(ticker, company):
+    info = info_by_ticker.get(ticker, {}) or {}
+    website = info.get("website")
+    if website:
+        from urllib.parse import urlparse
+        domain = urlparse(website if website.startswith("http") else "https://" + website).netloc.removeprefix("www.")
+        if domain:
+            src = f"https://www.google.com/s2/favicons?domain={_html.escape(domain)}&sz=64"
+            return f'<img class="radar-logo" src="{src}" alt="" loading="lazy" onerror="this.style.display=\'none\'">'
+    letters = "".join(part[0] for part in str(company).split()[:2]).upper()[:2]
+    return f'<span class="radar-monogram">{_html.escape(letters or ticker[:2])}</span>'
+
+def _sparkline(values, color="#39c98b"):
+    vals = [float(v) for v in values if pd.notna(v)]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    span = hi - lo or 1
+    pts = " ".join(f"{i/(len(vals)-1)*245:.1f},{49-(v-lo)/span*41:.1f}" for i,v in enumerate(vals))
+    peak_i = vals.index(max(vals))
+    peak_x = peak_i/(len(vals)-1)*245
+    peak_y = 49-(max(vals)-lo)/span*41
+    return (f'<svg class="spark" viewBox="0 0 245 58" preserveAspectRatio="none">'
+            f'<polygon points="0,58 {pts} 245,58" fill="rgba(105,183,232,.13)"/>'
+            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+            f'<circle cx="{peak_x:.1f}" cy="{peak_y:.1f}" r="3.5" fill="#e84d70"/></svg>')
+
+verdict_class = {"barata de verdad":"verdict-cheap", "algo barata":"verdict-some", "en precio":"verdict-fair", "cara (cayó, pero cara)":"verdict-expensive"}
+quality_class = {"sana":"quality-healthy", "aceptable":"quality-acceptable", "frágil":"quality-fragile", "posible trampa":"quality-trap", "sin datos":"quality-fragile"}
+for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
+    ticker = str(rr.get("Ticker", ""))
+    company = str(rr.get("Empresa", ""))
     hist = rr["Serie"].tail(60).tolist() if hasattr(rr["Serie"], "tail") else []
-    vals = [rr.get("Ticker",""), rr.get("Empresa",""), rr.get("Rank S&P",""), rr.get("Sector",""),
-            rr.get("Precio",""), rr.get("Caida",""), rr.get("Dias",""), rr.get("Sev.",""), rr.get("1 año",""),
-            rr.get("vs Ind.","—"), rr.get("vs Hist.","—"), rr.get("Valor","—"), rr.get("Veredicto",""), rr.get("Calidad","")]
-    cells = [f'<td><b>{_html.escape(str(vals[0]))}</b></td>',
-             f'<td><span class="company">{_html.escape(str(vals[1]))}</span></td>',
-             f'<td>#{_html.escape(str(vals[2]))}</td>', f'<td>{_html.escape(str(vals[3]))}</td>',
-             f'<td>{_html.escape(str(vals[4]))}</td>', f'<td><span class="drop">{_html.escape(str(vals[5]))}</span></td>',
-             f'<td>{_html.escape(str(vals[6]))} d</td>', f'<td>{_html.escape(str(vals[7]))}</td>',
-             f'<td>{_html.escape(str(vals[8]))}</td>', f'<td>{_sparkline(hist)}</td>',
-             f'<td>{_html.escape(str(vals[9]))}</td>', f'<td>{_html.escape(str(vals[10]))}</td>',
-             f'<td>{_html.escape(str(vals[11]))}</td>', f'<td>{_html.escape(str(vals[12]))}</td>',
-             f'<td>{_html.escape(str(vals[13]))}</td>']
-    html_rows.append('<tr>' + ''.join(cells) + '</tr>')
-headers=["Ticker","Empresa","Rank S&P","Sector","Precio","Caída","Días","Sev.","1 año","Evolución 1 año","vs Ind.","vs Hist.","Valor","Veredicto","Calidad"]
-head=''.join(f'<th onclick="sortTable({i})">{h} ↕</th>' for i,h in enumerate(headers))
-radar_html=f'''<style>
+    logo_html = _company_logo(ticker, company)
+    score = rr.get("F-score", np.nan)
+    tip_quality = (
+        f"Indicador interno: {int(score)} de 8 comprobaciones fundamentales aprobadas. "
+        "No es el Piotroski F-Score oficial. F8 = 8/8; F0 = 0/8. "
+        "Revisa rentabilidad, flujo operativo, márgenes, deuda, liquidez y patrimonio."
+        if pd.notna(score) else "No hubo datos fundamentales suficientes para calcular la puntuación."
+    )
+    q_label = str(rr.get("Calidad", "sin datos"))
+    q_class = quality_class.get(q_label.split(" · ")[0], "quality-fragile")
+    v_label = str(rr.get("Veredicto", "en precio"))
+    v_class = verdict_class.get(v_label, "verdict-expensive")
+    hist_value = str(rr.get("vs Hist.", "—"))
+    hist_tip = ("Percentil del último cierre frente a cierres diarios ajustados de hasta cinco años. "
+                "p20 significa que el precio está por encima de aproximadamente el 20% de los cierres del periodo; "
+                "p80, por encima del 80%. No es un múltiplo P/E histórico.")
+    cells = [
+        f'<td>{row_number}</td>',
+        f'<td><div class="radar-company">{logo_html}<div class="radar-company-text"><div class="radar-ticker">{_html.escape(ticker)}</div><div class="radar-name">{_html.escape(company)}</div></div></div></td>',
+        f'<td><b>#{int(rr.get("Rank S&P", 0))}</b></td>',
+        f'<td>{_html.escape(str(rr.get("Sector", "")))}</td>',
+        f'<td>${float(rr.get("Precio", 0)):,.2f}</td>',
+        f'<td><span class="drop">{float(rr.get("Caida", 0)):.1f}%</span></td>',
+        f'<td>{int(rr.get("Dias", 0))} d</td>',
+        f'<td>{int(rr.get("Sev.", 0))}</td>',
+        f'<td>{float(rr.get("1 año", 0)):+.1f}%</td>',
+        f'<td>{_sparkline(hist)}</td>',
+        f'<td>{float(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
+        f'<td title="{hist_tip}"><b>{_html.escape(hist_value)}</b></td>',
+        f'<td><b>{float(rr.get("Valor", 0)):+.2f}</b></td>',
+        f'<td><span class="radar-pill {v_class}" title="Veredicto orientativo del score; no es una recomendación de compra.">{_html.escape(v_label)}</span></td>',
+        f'<td><span class="radar-pill {q_class}" title="{_html.escape(tip_quality)}">{_html.escape(q_label)}</span></td>',
+    ]
+    html_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+headers = ["#","Empresa","Rank S&P","Sector","Precio","Caída","Días","Sev.","1 año","","vs Ind.","vs Hist.","Valor","Veredicto","Calidad"]
+tips = [
+    "Número consecutivo de la lista.", "Ticker y nombre de la compañía.",
+    "Puesto orientativo dentro del universo semilla; no es una clasificación oficial en tiempo real.",
+    "Sector económico.", "Último cierre disponible en Yahoo Finance.",
+    "Descenso desde el máximo móvil de 12 meses.", "Días calendario desde el máximo móvil.",
+    "Orden por severidad de caída.", "Variación aproximada de 12 meses.",
+    "Gráfica miniatura de la evolución del precio.",
+    "P/E frente a la mediana sectorial de los candidatos con datos.",
+    "Percentil del precio respecto de sus cierres de hasta cinco años; no es P/E histórico.",
+    "Puntuación heurística propia; no es una valoración intrínseca.",
+    "Clasificación orientativa del score compuesto.",
+    "Comprobaciones fundamentales aprobadas sobre ocho; no es Piotroski oficial."
+]
+head = "".join(f'<th title="{tips[i]}" onclick="sortTable({i})" style="cursor:pointer">{h}</th>' for i,h in enumerate(headers))
+radar_html = f"""<style>
 body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4ff}}
-.radar-wrap{{width:100%;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b}}
-.radar-table{{width:100%;min-width:1450px;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
-.radar-table th{{position:sticky;top:0;background:#172332;color:#f4f7fb;text-align:left;padding:16px 13px;border-bottom:1px solid #344354;white-space:nowrap;cursor:pointer;z-index:2}}
-.radar-table td{{padding:17px 13px;border-bottom:1px solid rgba(160,185,210,.15);height:76px;white-space:nowrap;vertical-align:middle}}
+.radar-wrap{{width:100%;height:720px;max-height:78vh;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b;scrollbar-color:#647d99 #101722}}
+.radar-table{{width:100%;min-width:1650px;table-layout:fixed;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
+.radar-table th{{position:sticky;top:0;z-index:5;background:#172332;color:#f4f7fb;text-align:left;padding:16px 12px;border-bottom:1px solid #344354;white-space:nowrap;font-weight:800}}
+.radar-table td{{padding:16px 12px;border-bottom:1px solid rgba(160,185,210,.15);height:88px;white-space:nowrap;vertical-align:middle}}
 .radar-table tbody tr:nth-child(even){{background:rgba(225,240,255,.035)}}.radar-table tbody tr:hover{{background:rgba(105,184,226,.13)}}
-.company{{font-weight:700;color:#9bc8ef}}.drop{{display:inline-block;background:#8f2e2b;color:white;border-radius:9px;padding:6px 10px;font-weight:700}}
-.spark{{width:240px;height:52px;display:block}}
-</style><div class="radar-wrap"><table class="radar-table" id="radarTable"><thead><tr>{head}</tr></thead><tbody>{''.join(html_rows)}</tbody></table></div>
-<script>function sortTable(n){{const t=document.getElementById('radarTable'),b=t.tBodies[0],r=[...b.rows];const asc=t.dataset.col==n?t.dataset.asc!=='true':true;r.sort((a,c)=>{{let x=a.cells[n].innerText.trim(),y=c.cells[n].innerText.trim();let nx=parseFloat(x.replace(/[^0-9.+-]/g,'')),ny=parseFloat(y.replace(/[^0-9.+-]/g,''));if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;return asc?x.localeCompare(y):y.localeCompare(x)}});r.forEach(x=>b.appendChild(x));t.dataset.col=n;t.dataset.asc=asc;}}</script>'''
-st.components.v1.html(radar_html, height=min(850, max(260, 90 + len(view)*78)), scrolling=True)
+.radar-table th:first-child,.radar-table td:first-child{{position:sticky;left:0;z-index:7;width:52px;min-width:52px;max-width:52px;text-align:center;background:#142131}}
+.radar-table th:nth-child(2),.radar-table td:nth-child(2){{position:sticky;left:52px;z-index:6;width:245px;min-width:245px;max-width:245px;background:#142131;box-shadow:7px 0 10px rgba(0,0,0,.18)}}
+.radar-table tbody tr:nth-child(even) td:first-child,.radar-table tbody tr:nth-child(even) td:nth-child(2){{background:#172536}}
+.radar-company{{display:flex;align-items:center;gap:11px;min-width:0}}.radar-logo{{width:36px;height:36px;min-width:36px;border-radius:50%;background:#eef4fb;object-fit:contain;padding:3px}}
+.radar-monogram{{width:36px;height:36px;min-width:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(140deg,#406b92,#664a8d);font-size:12px;font-weight:800;color:white}}
+.radar-company-text{{min-width:0;white-space:normal}}.radar-ticker{{font-size:15px;font-weight:800;color:#8fc8f5;line-height:1.3}}.radar-name{{font-size:12px;color:#d3dce8;margin-top:4px;line-height:1.25}}
+.drop{{display:inline-block;background:#8f2e2b;color:white;border-radius:9px;padding:6px 10px;font-weight:700}}
+.radar-pill{{display:inline-block;padding:6px 11px;border-radius:9px;font-size:12px;font-weight:800;white-space:nowrap}}
+.verdict-cheap,.quality-healthy{{background:#d9f3df;color:#24623b}}.verdict-some,.quality-acceptable{{background:#dce8f4;color:#315a7b}}.verdict-fair{{background:#e7e9ed;color:#555f6a}}.verdict-expensive,.quality-trap{{background:#f5dce5;color:#87334d}}.quality-fragile{{background:#f8e8c9;color:#80551e}}
+.spark{{width:245px;height:58px;display:block}}
+</style>
+<div class="radar-wrap"><table class="radar-table" id="radarTable"><thead><tr>{head}</tr></thead><tbody>{''.join(html_rows)}</tbody></table></div>
+<script>
+function sortTable(n){{const t=document.getElementById('radarTable'),b=t.tBodies[0],rows=[...b.rows];const asc=t.dataset.col==n?t.dataset.asc!=='true':true;rows.sort((a,c)=>{{let x=a.cells[n].innerText.trim(),y=c.cells[n].innerText.trim();let nx=parseFloat(x.replace(/[^0-9.+-]/g,'')),ny=parseFloat(y.replace(/[^0-9.+-]/g,''));if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;return asc?x.localeCompare(y):y.localeCompare(x)}});rows.forEach(r=>b.appendChild(r));t.dataset.col=n;t.dataset.asc=asc;}}
+</script>"""
+st.components.v1.html(radar_html, height=750, scrolling=False)
 csv = view[display_cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button("⬇ Exportar radar a CSV", data=csv, file_name="blue_chip_value_radar.csv", mime="text/csv")
 
 # ---------- Ficha detallada y chart ----------
 st.markdown('<div class="section-title">Ficha de empresa — precio, valoración y calidad</div>', unsafe_allow_html=True)
-symbols = data["Ticker"].tolist()
+symbols = META["Ticker"].tolist()
 if symbols:
     st.caption("Puedes escribir el nombre o ticker de cualquier compañía del universo, aunque no aparezca entre los candidatos por caída.")
     selected = st.selectbox("Buscar empresa en todo el universo", symbols, index=(symbols.index("AAPL") if "AAPL" in symbols else 0),
                             format_func=lambda s: f"{s} · {META.loc[META.Ticker.eq(s),'Empresa'].iloc[0]}")
-    selected_row = data[data["Ticker"]==selected].iloc[0]
+    selected_match = data[data["Ticker"]==selected]
+    if not selected_match.empty:
+        selected_row = selected_match.iloc[0]
+    else:
+        selected_hist = download_one_history(selected)
+        if selected_hist.empty or "Close" not in selected_hist:
+            st.warning(f"Yahoo Finance no devolvió el historial de {selected} en este momento.")
+            st.stop()
+        selected_close = selected_hist["Close"].dropna()
+        selected_one_year = selected_close.tail(252)
+        selected_last = float(selected_close.iloc[-1])
+        selected_row = pd.Series({
+            "Ticker": selected,
+            "Empresa": META.loc[META.Ticker.eq(selected), "Empresa"].iloc[0],
+            "Precio": selected_last,
+            "Caida": (selected_last / float(selected_one_year.max()) - 1) * 100,
+            "Serie": selected_close,
+            "Sector": META.loc[META.Ticker.eq(selected), "Sector"].iloc[0],
+        })
     if selected in view["Ticker"].tolist():
         r = view[view["Ticker"]==selected].iloc[0]
         raw_info = next((x["Info"] for x in fund_rows if x["Ticker"]==selected), {})
@@ -557,4 +736,5 @@ st.markdown("""
  </ul>
 </div>
 """, unsafe_allow_html=True)
-st.caption("Blue Chip Value Scanner · herramienta educativa de investigación · no constituye asesoría financiera.")
+st.caption(f"Blue Chip Value Scanner · {BUILD_VERSION} · actualización automática cada 5 minutos si Yahoo responde · herramienta educativa, no asesoría financiera.")
+
