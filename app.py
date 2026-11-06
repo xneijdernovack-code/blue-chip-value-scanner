@@ -152,6 +152,20 @@ html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, sans-
 .section-title { color:#b9dff2; border-left:5px solid #78cddd; padding-left:14px; font-size:24px; font-weight:750; margin-top:32px; }
 .section-copy { color:#e4eaf4; line-height:1.6; }
 div[data-testid="stDataFrame"] { background:#fff; border-radius:12px; }
+.fund-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0 22px;}
+.fund-card {background:linear-gradient(135deg,rgba(44,83,122,.58),rgba(61,43,93,.62));border:1px solid rgba(190,220,245,.22);border-radius:14px;padding:15px 17px;min-height:88px;box-shadow:0 8px 22px rgba(0,0,0,.12)}
+.fund-label {font-size:12px;color:#b8cce2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.fund-value {font-size:20px;font-weight:750;color:#f1f6ff;overflow-wrap:anywhere}
+.radar-wrap {width:100%;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b;}
+.radar-table {width:100%;min-width:1450px;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px;}
+.radar-table th {position:sticky;top:0;background:#172332;color:#f4f7fb;text-align:left;padding:16px 13px;border-bottom:1px solid #344354;white-space:nowrap;cursor:pointer;z-index:2}
+.radar-table td {padding:17px 13px;border-bottom:1px solid rgba(160,185,210,.15);height:76px;white-space:nowrap;vertical-align:middle}
+.radar-table tbody tr:nth-child(even){background:rgba(225,240,255,.035)}
+.radar-table tbody tr:hover{background:rgba(105,184,226,.13)}
+.radar-table .company {font-weight:700;color:#9bc8ef}.radar-table .sub {display:block;font-size:12px;color:#aebdce;margin-top:5px;font-weight:400}
+.radar-table .drop {display:inline-block;background:#8f2e2b;color:white;border-radius:9px;padding:6px 10px;font-weight:700}
+.radar-table .spark {width:240px;height:52px;display:block}
+@media(max-width:850px){.fund-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
 div[data-testid="stMetric"] { background:rgba(255,255,255,.10); padding:12px 16px; border-radius:12px; }
 .stButton>button { border-radius:12px; font-weight:700; }
 footer {visibility:hidden;}
@@ -414,33 +428,79 @@ view["1 año"] = view["1 año"].map(lambda x: f"{x:+.1f}%" if pd.notna(x) else "
 display_cols = ["Ticker","Empresa","Rank S&P","Sector","Precio","Caida","Dias","Sev.","1 año","vs Ind.","vs Hist.","Valor","Veredicto","Calidad"]
 table = view[display_cols].rename(columns={"Ticker":"Símbolo","Caida":"Caída","Dias":"Días","Sev.":"Sev."})
 table.insert(table.columns.get_loc("1 año")+1, "Evolución 1 año", view["Serie"].apply(lambda s: list(pd.Series(s).tail(60).round(2))))
-st.dataframe(table, use_container_width=True, hide_index=True, height=540,
-             column_config={
-                 "Símbolo":st.column_config.TextColumn("Ticker",width="small"),
-                 "Empresa":st.column_config.TextColumn("Empresa",width="medium"),
-                 "Rank S&P":st.column_config.NumberColumn("Rank S&P",format="#%d"),
-                 "Caída":st.column_config.TextColumn("Caída",width="small"),
-                 "Calidad":st.column_config.TextColumn("Calidad",width="medium"),
-                 "Veredicto":st.column_config.TextColumn("Veredicto",width="medium"),
-                 "Evolución 1 año":st.column_config.LineChartColumn("1 año",width="large"),
-             })
+# Tabla radar personalizada: mantiene las mini-gráficas visibles y da más aire vertical a cada fila.
+import html as _html
+
+def _sparkline(values, color="#39c98b"):
+    vals = [float(v) for v in values if pd.notna(v)]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    span = hi-lo or 1
+    pts = " ".join(f"{i/(len(vals)-1)*230:.1f},{44-(v-lo)/span*36:.1f}" for i,v in enumerate(vals))
+    return f'<svg class="spark" viewBox="0 0 230 52" preserveAspectRatio="none"><polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+html_rows=[]
+for _, rr in view.iterrows():
+    hist = rr["Serie"].tail(60).tolist() if hasattr(rr["Serie"], "tail") else []
+    vals = [rr.get("Ticker",""), rr.get("Empresa",""), rr.get("Rank S&P",""), rr.get("Sector",""),
+            rr.get("Precio",""), rr.get("Caida",""), rr.get("Dias",""), rr.get("Sev.",""), rr.get("1 año",""),
+            rr.get("vs Ind.","—"), rr.get("vs Hist.","—"), rr.get("Valor","—"), rr.get("Veredicto",""), rr.get("Calidad","")]
+    cells = [f'<td><b>{_html.escape(str(vals[0]))}</b></td>',
+             f'<td><span class="company">{_html.escape(str(vals[1]))}</span></td>',
+             f'<td>#{_html.escape(str(vals[2]))}</td>', f'<td>{_html.escape(str(vals[3]))}</td>',
+             f'<td>{_html.escape(str(vals[4]))}</td>', f'<td><span class="drop">{_html.escape(str(vals[5]))}</span></td>',
+             f'<td>{_html.escape(str(vals[6]))} d</td>', f'<td>{_html.escape(str(vals[7]))}</td>',
+             f'<td>{_html.escape(str(vals[8]))}</td>', f'<td>{_sparkline(hist)}</td>',
+             f'<td>{_html.escape(str(vals[9]))}</td>', f'<td>{_html.escape(str(vals[10]))}</td>',
+             f'<td>{_html.escape(str(vals[11]))}</td>', f'<td>{_html.escape(str(vals[12]))}</td>',
+             f'<td>{_html.escape(str(vals[13]))}</td>']
+    html_rows.append('<tr>' + ''.join(cells) + '</tr>')
+headers=["Ticker","Empresa","Rank S&P","Sector","Precio","Caída","Días","Sev.","1 año","Evolución 1 año","vs Ind.","vs Hist.","Valor","Veredicto","Calidad"]
+head=''.join(f'<th onclick="sortTable({i})">{h} ↕</th>' for i,h in enumerate(headers))
+radar_html=f'''<style>
+body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4ff}}
+.radar-wrap{{width:100%;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b}}
+.radar-table{{width:100%;min-width:1450px;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
+.radar-table th{{position:sticky;top:0;background:#172332;color:#f4f7fb;text-align:left;padding:16px 13px;border-bottom:1px solid #344354;white-space:nowrap;cursor:pointer;z-index:2}}
+.radar-table td{{padding:17px 13px;border-bottom:1px solid rgba(160,185,210,.15);height:76px;white-space:nowrap;vertical-align:middle}}
+.radar-table tbody tr:nth-child(even){{background:rgba(225,240,255,.035)}}.radar-table tbody tr:hover{{background:rgba(105,184,226,.13)}}
+.company{{font-weight:700;color:#9bc8ef}}.drop{{display:inline-block;background:#8f2e2b;color:white;border-radius:9px;padding:6px 10px;font-weight:700}}
+.spark{{width:240px;height:52px;display:block}}
+</style><div class="radar-wrap"><table class="radar-table" id="radarTable"><thead><tr>{head}</tr></thead><tbody>{''.join(html_rows)}</tbody></table></div>
+<script>function sortTable(n){{const t=document.getElementById('radarTable'),b=t.tBodies[0],r=[...b.rows];const asc=t.dataset.col==n?t.dataset.asc!=='true':true;r.sort((a,c)=>{{let x=a.cells[n].innerText.trim(),y=c.cells[n].innerText.trim();let nx=parseFloat(x.replace(/[^0-9.+-]/g,'')),ny=parseFloat(y.replace(/[^0-9.+-]/g,''));if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;return asc?x.localeCompare(y):y.localeCompare(x)}});r.forEach(x=>b.appendChild(x));t.dataset.col=n;t.dataset.asc=asc;}}</script>'''
+st.components.v1.html(radar_html, height=min(850, max(260, 90 + len(view)*78)), scrolling=True)
 csv = view[display_cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button("⬇ Exportar radar a CSV", data=csv, file_name="blue_chip_value_radar.csv", mime="text/csv")
 
 # ---------- Ficha detallada y chart ----------
 st.markdown('<div class="section-title">Ficha de empresa — precio, valoración y calidad</div>', unsafe_allow_html=True)
-symbols = view["Ticker"].tolist()
+symbols = data["Ticker"].tolist()
 if symbols:
-    selected = st.selectbox("Selecciona una empresa", symbols, format_func=lambda s: f"{s} · {META.loc[META.Ticker.eq(s),'Empresa'].iloc[0]}")
-    r = view[view["Ticker"]==selected].iloc[0]
-    raw_info = next((x["Info"] for x in fund_rows if x["Ticker"]==selected), {})
+    st.caption("Puedes escribir el nombre o ticker de cualquier compañía del universo, aunque no aparezca entre los candidatos por caída.")
+    selected = st.selectbox("Buscar empresa en todo el universo", symbols, index=(symbols.index("AAPL") if "AAPL" in symbols else 0),
+                            format_func=lambda s: f"{s} · {META.loc[META.Ticker.eq(s),'Empresa'].iloc[0]}")
+    selected_row = data[data["Ticker"]==selected].iloc[0]
+    if selected in view["Ticker"].tolist():
+        r = view[view["Ticker"]==selected].iloc[0]
+        raw_info = next((x["Info"] for x in fund_rows if x["Ticker"]==selected), {})
+    else:
+        r = selected_row.copy()
+        try:
+            raw_info, _bs, _inc, _cf = get_fundamentals(selected)
+            r["P/E"] = raw_info.get("trailingPE", np.nan)
+            fcf = raw_info.get("freeCashflow"); mc = raw_info.get("marketCap")
+            r["FCF Yield"] = (fcf/mc*100) if fcf is not None and mc else np.nan
+        except Exception:
+            raw_info = {}
+            r["P/E"] = np.nan; r["FCF Yield"] = np.nan
     a,b,c,d = st.columns(4)
-    a.metric("Precio", f"${r['Precio']}")
-    b.metric("Caída desde pico", f"{r['Caida']}")
-    c.metric("P/E trailing", f"{r['P/E']:.1f}x" if pd.notna(r["P/E"]) else "N/D")
-    d.metric("FCF yield", f"{r['FCF Yield']:.1f}%" if pd.notna(r["FCF Yield"]) else "N/D")
+    a.metric("Precio", f"${float(selected_row['Precio']):,.2f}")
+    b.metric("Caída desde pico", f"{float(selected_row['Caida']):.1f}%")
+    c.metric("P/E trailing", f"{r['P/E']:.1f}x" if pd.notna(r.get("P/E", np.nan)) else "N/D")
+    d.metric("FCF yield", f"{r['FCF Yield']:.1f}%" if pd.notna(r.get("FCF Yield", np.nan)) else "N/D")
     # Plot 1-year close series
-    series = r["Serie"]
+    series = selected_row["Serie"]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines", name=selected,
                              line=dict(color="#67b7e8",width=2), fill="tozeroy",
@@ -448,18 +508,40 @@ if symbols:
     peakdate = series.idxmax()
     fig.add_trace(go.Scatter(x=[peakdate], y=[series.max()], mode="markers",
                              marker=dict(color="#e84d70",size=9), name="Pico 12m"))
-    fig.update_layout(height=340, margin=dict(l=10,r=10,t=20,b=10),
+    fig.update_layout(height=430, margin=dict(l=18,r=18,t=28,b=24),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(255,255,255,.04)",
                       font=dict(color="#eaf2fb"), xaxis_title="", yaxis_title="USD",
                       legend=dict(orientation="h",y=1.08))
     st.plotly_chart(fig, use_container_width=True)
-    with st.expander("Ver datos fundamentales disponibles"):
-        safe = {k:v for k,v in raw_info.items() if k in [
-            "sector","industry","marketCap","trailingPE","forwardPE","priceToBook",
-            "returnOnAssets","returnOnEquity","profitMargins","grossMargins",
-            "debtToEquity","currentRatio","freeCashflow","operatingCashflow",
-            "revenueGrowth","earningsGrowth","dividendYield"]}
-        st.json(safe)
+    with st.expander("Ver datos fundamentales disponibles", expanded=False):
+        def _fmt_money(v):
+            if v is None or pd.isna(v): return "Sin dato"
+            v=float(v); a=abs(v)
+            return (f"${v/1e12:.2f} T" if a>=1e12 else f"${v/1e9:.2f} B" if a>=1e9 else f"${v/1e6:.1f} M" if a>=1e6 else f"${v:,.2f}")
+        def _fmt_pct(v): return "Sin dato" if v is None or pd.isna(v) else f"{float(v)*100:.1f}%"
+        def _fmt_num(v, suffix=""): return "Sin dato" if v is None or pd.isna(v) else f"{float(v):,.2f}{suffix}"
+        fundamentals = [
+            ("Sector", raw_info.get("sector") or r.get("Sector","Sin dato")),
+            ("Industria", raw_info.get("industry") or "Sin dato"),
+            ("Capitalización", _fmt_money(raw_info.get("marketCap"))),
+            ("P/E actual", _fmt_num(raw_info.get("trailingPE"), "x")),
+            ("P/E estimado", _fmt_num(raw_info.get("forwardPE"), "x")),
+            ("Precio / valor contable", _fmt_num(raw_info.get("priceToBook"), "x")),
+            ("Rentabilidad sobre activos (ROA)", _fmt_pct(raw_info.get("returnOnAssets"))),
+            ("Rentabilidad sobre patrimonio (ROE)", _fmt_pct(raw_info.get("returnOnEquity"))),
+            ("Margen neto", _fmt_pct(raw_info.get("profitMargins"))),
+            ("Margen bruto", _fmt_pct(raw_info.get("grossMargins"))),
+            ("Deuda / patrimonio", _fmt_num(raw_info.get("debtToEquity"))),
+            ("Ratio corriente", _fmt_num(raw_info.get("currentRatio"))),
+            ("Flujo de caja libre", _fmt_money(raw_info.get("freeCashflow"))),
+            ("Flujo operativo", _fmt_money(raw_info.get("operatingCashflow"))),
+            ("Crecimiento de ingresos", _fmt_pct(raw_info.get("revenueGrowth"))),
+            ("Crecimiento de beneficios", _fmt_pct(raw_info.get("earningsGrowth"))),
+            ("Rendimiento por dividendo", _fmt_pct(raw_info.get("dividendYield"))),
+        ]
+        cards=''.join(f'<div class="fund-card"><div class="fund-label">{_html.escape(str(k))}</div><div class="fund-value">{_html.escape(str(v))}</div></div>' for k,v in fundamentals)
+        st.markdown(f'<div class="fund-grid">{cards}</div>', unsafe_allow_html=True)
+        st.caption("Los campos marcados como ‘Sin dato’ no fueron publicados o no estuvieron disponibles en la respuesta del proveedor.")
 else:
     st.info("No hay candidatos con los filtros seleccionados.")
 
