@@ -300,29 +300,6 @@ def field(df, names, col=0):
                 pass
     return np.nan
 
-def get_usable_pe(info, price):
-    """Obtiene un P/E positivo utilizable; evita NaN cuando Yahoo omite trailingPE."""
-    candidates = [
-        info.get("trailingPE"),
-        info.get("forwardPE"),
-    ]
-    eps = info.get("trailingEps")
-    try:
-        eps = float(eps)
-        if eps > 0 and pd.notna(price) and float(price) > 0:
-            candidates.append(float(price) / eps)
-    except (TypeError, ValueError):
-        pass
-    for value in candidates:
-        try:
-            value = float(value)
-            if pd.notna(value) and value > 0 and value < 500:
-                return value
-        except (TypeError, ValueError):
-            continue
-    return np.nan
-
-
 def build_quality(info, bs, inc, cf):
     checks = []
     roa = info.get("returnOnAssets")
@@ -476,9 +453,7 @@ for i, (_, row) in enumerate(candidates.iterrows()):
     sym = row["Ticker"]
     try:
         info, bs, inc, cf = get_fundamentals(sym)
-        # Yahoo a veces no entrega trailingPE aunque sí tenga EPS o forwardPE.
-        # Usamos alternativas válidas antes de marcar el dato como no disponible.
-        pe = get_usable_pe(info, row.get("Precio", np.nan))
+        pe = info.get("trailingPE")
         fcf = info.get("freeCashflow")
         mcap = info.get("marketCap")
         fcf_yield = (fcf/mcap*100) if fcf is not None and mcap and mcap > 0 else np.nan
@@ -494,27 +469,13 @@ fund = pd.DataFrame(fund_rows)
 if fund.empty:
     fund = pd.DataFrame(columns=["Ticker","P/E","FCF Yield","F-score","F-count","Market Cap","Info"])
 view = candidates.merge(fund.drop(columns=["Info"], errors="ignore"), on="Ticker", how="left")
-# Comparación de valoración: P/E de la empresa frente a la mediana de su sector.
-# Se requieren al menos 2 empresas con P/E positivo en el sector; si no, no se inventa un dato.
-view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
-view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
-sector_stats = view.groupby("Sector")["P/E"].agg(["median", "count"])
-view["Sector P/E mediana"] = view["Sector"].map(sector_stats["median"])
-view["Sector P/E pares"] = view["Sector"].map(sector_stats["count"])
-valid_pe = (
-    view["P/E"].notna()
-    & view["Sector P/E mediana"].notna()
-    & (view["Sector P/E mediana"] > 0)
-    & (view["Sector P/E pares"] >= 2)
-)
-view["vs Ind."] = np.where(
-    valid_pe,
-    (view["P/E"] / view["Sector P/E mediana"] - 1) * 100,
-    np.nan
-)
+# Sector median P/E; comparisons are only shown if there are enough valid peers.
+sector_pe = view.groupby("Sector")["P/E"].transform("median")
+view["vs Ind."] = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
+                            (view["P/E"]/sector_pe-1)*100, np.nan)
 # A transparent relative score: drawdown + discount to sector + F-score + FCF yield.
-pe_discount = np.where(valid_pe,
-                       np.clip((view["Sector P/E mediana"]-view["P/E"])/view["Sector P/E mediana"]*100,-100,100), 0)
+pe_discount = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
+                       np.clip((sector_pe-view["P/E"])/sector_pe*100,-100,100), 0)
 quality_norm = view["F-score"].fillna(4)/8*100
 fcf_norm = view["FCF Yield"].clip(-10,20).fillna(0)
 view["Valor"] = (0.45*(100+view["Caida"].clip(-80,0))/80*100 +
@@ -593,6 +554,33 @@ def _sparkline(values, color="#39c98b"):
 
 verdict_class = {"barata de verdad":"verdict-cheap", "algo barata":"verdict-some", "en precio":"verdict-fair", "cara (cayó, pero cara)":"verdict-expensive"}
 quality_class = {"sana":"quality-healthy", "aceptable":"quality-acceptable", "frágil":"quality-fragile", "posible trampa":"quality-trap", "sin datos":"quality-fragile"}
+def _safe_float(value, default=0.0):
+    """Convierte valores numéricos aunque lleguen formateados como '$338.38' o '-12.5%'."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+    cleaned = str(value).strip()
+    if cleaned in ("", "—", "-", "N/D", "Sin dato"):
+        return default
+    cleaned = cleaned.replace("$", "").replace(",", "").replace("%", "")
+    cleaned = cleaned.replace("−", "-").replace(" ", "")
+    # Admite formatos contables como (123.45).
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = "-" + cleaned[1:-1]
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value, default=0):
+    return int(round(_safe_float(value, default)))
+
 for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
     ticker = str(rr.get("Ticker", ""))
     company = str(rr.get("Empresa", ""))
@@ -618,15 +606,15 @@ for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
         f'<td><div class="radar-company">{logo_html}<div class="radar-company-text"><div class="radar-ticker">{_html.escape(ticker)}</div><div class="radar-name">{_html.escape(company)}</div></div></div></td>',
         f'<td><b>#{int(rr.get("Rank S&P", 0))}</b></td>',
         f'<td>{_html.escape(str(rr.get("Sector", "")))}</td>',
-        f'<td>${float(rr.get("Precio", 0)):,.2f}</td>',
-        f'<td><span class="drop">{float(rr.get("Caida", 0)):.1f}%</span></td>',
-        f'<td>{int(rr.get("Dias", 0))} d</td>',
-        f'<td>{int(rr.get("Sev.", 0))}</td>',
-        f'<td>{float(rr.get("1 año", 0)):+.1f}%</td>',
+        f'<td>${_safe_float(rr.get("Precio", 0)):,.2f}</td>',
+        f'<td><span class="drop">{_safe_float(rr.get("Caida", 0)):.1f}%</span></td>',
+        f'<td>{_safe_int(rr.get("Dias", 0))} d</td>',
+        f'<td>{_safe_int(rr.get("Sev.", 0))}</td>',
+        f'<td>{_safe_float(rr.get("1 año", 0)):+.1f}%</td>',
         f'<td>{_sparkline(hist)}</td>',
-        f'<td>{float(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
+        f'<td>{_safe_float(rr.get("vs Ind.", np.nan), np.nan):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
         f'<td title="{hist_tip}"><b>{_html.escape(hist_value)}</b></td>',
-        f'<td><b>{float(rr.get("Valor", 0)):+.2f}</b></td>',
+        f'<td><b>{_safe_float(rr.get("Valor", 0)):+.2f}</b></td>',
         f'<td><span class="radar-pill {v_class}" title="Veredicto orientativo del score; no es una recomendación de compra.">{_html.escape(v_label)}</span></td>',
         f'<td><span class="radar-pill {q_class}" title="{_html.escape(tip_quality)}">{_html.escape(q_label)}</span></td>',
     ]
@@ -640,7 +628,7 @@ tips = [
     "Descenso desde el máximo móvil de 12 meses.", "Días calendario desde el máximo móvil.",
     "Orden por severidad de caída.", "Variación aproximada de 12 meses.",
     "Gráfica miniatura de la evolución del precio.",
-    "P/E de la empresa frente a la mediana sectorial. Requiere al menos dos empresas con P/E válido; si faltan datos se muestra —.",
+    "P/E frente a la mediana sectorial de los candidatos con datos.",
     "Percentil del precio respecto de sus cierres de hasta cinco años; no es P/E histórico.",
     "Puntuación heurística propia; no es una valoración intrínseca.",
     "Clasificación orientativa del score compuesto.",
@@ -776,5 +764,3 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.caption(f"Blue Chip Value Scanner · {BUILD_VERSION} · actualización automática cada 5 minutos si Yahoo responde · herramienta educativa, no asesoría financiera.")
-
-
