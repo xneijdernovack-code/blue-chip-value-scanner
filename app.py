@@ -340,13 +340,17 @@ def get_usable_pe(info, price):
         info.get("trailingPE"),
         info.get("forwardPE"),
     ]
-    eps = info.get("trailingEps")
-    try:
-        eps = float(eps)
-        if eps > 0 and pd.notna(price) and safe_number(price, 0) > 0:
-            candidates.append(safe_number(price, 0) / eps)
-    except (TypeError, ValueError):
-        pass
+    # Yahoo puede omitir los múltiplos ya calculados, pero entregar EPS.
+    # Probamos EPS trailing y forward como alternativas transparentes.
+    for eps_key in ("trailingEps", "forwardEps"):
+        eps = info.get(eps_key)
+        try:
+            eps = float(eps)
+            numeric_price = safe_number(price, 0)
+            if eps > 0 and pd.notna(numeric_price) and numeric_price > 0:
+                candidates.append(numeric_price / eps)
+        except (TypeError, ValueError):
+            continue
     for value in candidates:
         try:
             value = float(value)
@@ -532,23 +536,45 @@ view = candidates.merge(fund.drop(columns=["Info"], errors="ignore"), on="Ticker
 # Se requieren al menos 2 empresas con P/E positivo en el sector; si no, no se inventa un dato.
 view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
 view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
+# Comparación contra pares del sector. Cuando hay industria disponible y suficientes
+# pares, usamos la mediana de industria; si no, la del sector completo.
+view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
+view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
+
+# La industria se recupera de los datos fundamentales ya consultados.
+industry_by_ticker = {
+    item["Ticker"]: (item.get("Info", {}) or {}).get("industry")
+    for item in fund_rows
+}
+view["Industria"] = view["Ticker"].map(industry_by_ticker)
 sector_stats = view.groupby("Sector")["P/E"].agg(["median", "count"])
+industry_stats = view.dropna(subset=["Industria"]).groupby("Industria")["P/E"].agg(["median", "count"])
 view["Sector P/E mediana"] = view["Sector"].map(sector_stats["median"])
 view["Sector P/E pares"] = view["Sector"].map(sector_stats["count"])
+view["Industria P/E mediana"] = view["Industria"].map(industry_stats["median"])
+view["Industria P/E pares"] = view["Industria"].map(industry_stats["count"])
+
+use_industry = (
+    view["Industria P/E mediana"].notna()
+    & (view["Industria P/E mediana"] > 0)
+    & (view["Industria P/E pares"] >= 2)
+)
+view["P/E referencia"] = np.where(use_industry, view["Industria P/E mediana"], view["Sector P/E mediana"])
+view["Pares referencia"] = np.where(use_industry, view["Industria P/E pares"], view["Sector P/E pares"])
 valid_pe = (
     view["P/E"].notna()
-    & view["Sector P/E mediana"].notna()
-    & (view["Sector P/E mediana"] > 0)
-    & (view["Sector P/E pares"] >= 2)
+    & view["P/E referencia"].notna()
+    & (view["P/E referencia"] > 0)
+    & (view["Pares referencia"] >= 2)
 )
 view["vs Ind."] = np.where(
     valid_pe,
-    (view["P/E"] / view["Sector P/E mediana"] - 1) * 100,
+    (view["P/E"] / view["P/E referencia"] - 1) * 100,
     np.nan
 )
 # A transparent relative score: drawdown + discount to sector + F-score + FCF yield.
 pe_discount = np.where(valid_pe,
-                       np.clip((view["Sector P/E mediana"]-view["P/E"])/view["Sector P/E mediana"]*100,-100,100), 0)
+                       np.clip((view["P/E referencia"]-view["P/E"])/view["P/E referencia"]*100,-100,100), 0)
 quality_norm = view["F-score"].fillna(4)/8*100
 fcf_norm = view["FCF Yield"].clip(-10,20).fillna(0)
 view["Valor"] = (0.45*(100+view["Caida"].clip(-80,0))/80*100 +
@@ -601,14 +627,23 @@ info_by_ticker = {x["Ticker"]: x.get("Info", {}) for x in fund_rows}
 def _company_logo(ticker, company):
     info = info_by_ticker.get(ticker, {}) or {}
     website = info.get("website")
+    domain = ""
     if website:
         from urllib.parse import urlparse
-        domain = urlparse(website if website.startswith("http") else "https://" + website).netloc.removeprefix("www.")
-        if domain:
-            src = f"https://www.google.com/s2/favicons?domain={_html.escape(domain)}&sz=64"
-            return f'<img class="radar-logo" src="{src}" alt="" loading="lazy" onerror="this.style.display=\'none\'">'
+        domain = urlparse(website if str(website).startswith("http") else "https://" + str(website)).netloc.removeprefix("www.")
+    # Endpoint público de logos por ticker; si falla, probamos el favicon del dominio.
+    fallback = (
+        f"https://www.google.com/s2/favicons?domain={_html.escape(domain)}&sz=64"
+        if domain else ""
+    )
+    src = f"https://assets.parqet.com/logos/symbol/{_html.escape(ticker)}?format=png"
     letters = "".join(part[0] for part in str(company).split()[:2]).upper()[:2]
-    return f'<span class="radar-monogram">{_html.escape(letters or ticker[:2])}</span>'
+    monogram = _html.escape(letters or ticker[:2])
+    if fallback:
+        onerror = f"this.onerror=function(){{this.outerHTML='<span class=\\'radar-monogram\\'>{monogram}</span>'}};this.src='{fallback}'"
+    else:
+        onerror = f"this.outerHTML='<span class=\\'radar-monogram\\'>{monogram}</span>'"
+    return f'<img class="radar-logo" src="{src}" alt="{monogram}" loading="lazy" onerror="{onerror}">'
 
 def _sparkline(values, color="#39c98b"):
     vals = [float(v) for v in values if pd.notna(v)]
@@ -674,7 +709,7 @@ tips = [
     "Descenso desde el máximo móvil de 12 meses.", "Días calendario desde el máximo móvil.",
     "Orden por severidad de caída.", "Variación aproximada de 12 meses.",
     "Gráfica miniatura de la evolución del precio.",
-    "P/E de la empresa frente a la mediana sectorial. Requiere al menos dos empresas con P/E válido; si faltan datos se muestra —.",
+    "P/E frente a la mediana de la industria cuando hay al menos dos pares; si no, usa la mediana del sector. Si faltan datos suficientes, muestra —.",
     "Percentil del precio respecto de sus cierres de hasta cinco años; no es P/E histórico.",
     "Puntuación heurística propia; no es una valoración intrínseca.",
     "Clasificación orientativa del score compuesto.",
