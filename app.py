@@ -554,6 +554,33 @@ def _sparkline(values, color="#39c98b"):
 
 verdict_class = {"barata de verdad":"verdict-cheap", "algo barata":"verdict-some", "en precio":"verdict-fair", "cara (cayó, pero cara)":"verdict-expensive"}
 quality_class = {"sana":"quality-healthy", "aceptable":"quality-acceptable", "frágil":"quality-fragile", "posible trampa":"quality-trap", "sin datos":"quality-fragile"}
+def _safe_float(value, default=0.0):
+    """Convierte valores numéricos aunque lleguen formateados como '$338.38' o '-12.5%'."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+    cleaned = str(value).strip()
+    if cleaned in ("", "—", "-", "N/D", "Sin dato"):
+        return default
+    cleaned = cleaned.replace("$", "").replace(",", "").replace("%", "")
+    cleaned = cleaned.replace("−", "-").replace(" ", "")
+    # Admite formatos contables como (123.45).
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = "-" + cleaned[1:-1]
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value, default=0):
+    return int(round(_safe_float(value, default)))
+
 for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
     ticker = str(rr.get("Ticker", ""))
     company = str(rr.get("Empresa", ""))
@@ -579,15 +606,15 @@ for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
         f'<td><div class="radar-company">{logo_html}<div class="radar-company-text"><div class="radar-ticker">{_html.escape(ticker)}</div><div class="radar-name">{_html.escape(company)}</div></div></div></td>',
         f'<td><b>#{int(rr.get("Rank S&P", 0))}</b></td>',
         f'<td>{_html.escape(str(rr.get("Sector", "")))}</td>',
-        f'<td>${float(rr.get("Precio", 0)):,.2f}</td>',
-        f'<td><span class="drop">{float(rr.get("Caida", 0)):.1f}%</span></td>',
-        f'<td>{int(rr.get("Dias", 0))} d</td>',
-        f'<td>{int(rr.get("Sev.", 0))}</td>',
-        f'<td>{float(rr.get("1 año", 0)):+.1f}%</td>',
+        f'<td>${_safe_float(rr.get("Precio", 0)):,.2f}</td>',
+        f'<td><span class="drop">{_safe_float(rr.get("Caida", 0)):.1f}%</span></td>',
+        f'<td>{_safe_int(rr.get("Dias", 0))} d</td>',
+        f'<td>{_safe_int(rr.get("Sev.", 0))}</td>',
+        f'<td>{_safe_float(rr.get("1 año", 0)):+.1f}%</td>',
         f'<td>{_sparkline(hist)}</td>',
-        f'<td>{float(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
+        f'<td>{_safe_float(rr.get("vs Ind.", np.nan), np.nan):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
         f'<td title="{hist_tip}"><b>{_html.escape(hist_value)}</b></td>',
-        f'<td><b>{float(rr.get("Valor", 0)):+.2f}</b></td>',
+        f'<td><b>{_safe_float(rr.get("Valor", 0)):+.2f}</b></td>',
         f'<td><span class="radar-pill {v_class}" title="Veredicto orientativo del score; no es una recomendación de compra.">{_html.escape(v_label)}</span></td>',
         f'<td><span class="radar-pill {q_class}" title="{_html.escape(tip_quality)}">{_html.escape(q_label)}</span></td>',
     ]
