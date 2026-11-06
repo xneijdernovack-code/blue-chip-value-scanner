@@ -150,7 +150,7 @@ html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, sans-
 .notice h3 { color:#98233d; font-size:18px; margin:0 0 10px; }
 .notice li { margin:5px 0; }
 .section-title { color:#b9dff2; border-left:5px solid #78cddd; padding-left:14px; font-size:24px; font-weight:750; margin-top:32px; }
-.section-copy { color:#e4eaf4; line-height:1.6; }
+.section-copy { color:#e4eaf4; line-height:1.6; margin-bottom:24px; }
 div[data-testid="stDataFrame"] { background:#fff; border-radius:12px; }
 .fund-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0 22px;}
 .fund-card {background:linear-gradient(135deg,rgba(44,83,122,.58),rgba(61,43,93,.62));border:1px solid rgba(190,220,245,.22);border-radius:14px;padding:15px 17px;min-height:88px;box-shadow:0 8px 22px rgba(0,0,0,.12)}
@@ -500,7 +500,7 @@ if symbols:
     c.metric("P/E trailing", f"{r['P/E']:.1f}x" if pd.notna(r.get("P/E", np.nan)) else "N/D")
     d.metric("FCF yield", f"{r['FCF Yield']:.1f}%" if pd.notna(r.get("FCF Yield", np.nan)) else "N/D")
     # Plot 1-year close series
-    series = selected_row["Serie"]
+    series = selected_row["Serie"].tail(252)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines", name=selected,
                              line=dict(color="#67b7e8",width=2), fill="tozeroy",
