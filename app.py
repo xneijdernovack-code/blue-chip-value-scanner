@@ -271,6 +271,15 @@ def download_one_history(ticker, period="5y"):
         return pd.DataFrame()
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def get_peer_info(ticker):
+    """Consulta solo la ficha de Yahoo para calcular múltiplos de pares del universo completo."""
+    try:
+        return yf.Ticker(ticker).get_info() or {}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_fundamentals(ticker):
     t = yf.Ticker(ticker)
     info = t.get_info()
@@ -532,23 +541,60 @@ fund = pd.DataFrame(fund_rows)
 if fund.empty:
     fund = pd.DataFrame(columns=["Ticker","P/E","FCF Yield","F-score","F-count","Market Cap","Info"])
 view = candidates.merge(fund.drop(columns=["Info"], errors="ignore"), on="Ticker", how="left")
-# Comparación de valoración: P/E de la empresa frente a la mediana de su sector.
-# Se requieren al menos 2 empresas con P/E positivo en el sector; si no, no se inventa un dato.
-view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
-view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
-# Comparación contra pares del sector. Cuando hay industria disponible y suficientes
-# pares, usamos la mediana de industria; si no, la del sector completo.
+# Comparación de valoración: referencia calculada con el universo completo,
+# no solo con los candidatos que aparecen en la tabla.
 view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
 view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
 
-# La industria se recupera de los datos fundamentales ya consultados.
-industry_by_ticker = {
-    item["Ticker"]: (item.get("Info", {}) or {}).get("industry")
+# Primero reutilizamos los fundamentales ya consultados para los candidatos.
+peer_rows = []
+candidate_info = {
+    item["Ticker"]: (item.get("Info", {}) or {})
     for item in fund_rows
 }
+price_by_ticker = dict(zip(data["Ticker"], data["Precio"])) if "Ticker" in data.columns else {}
+
+# Para los demás integrantes del universo consultamos solo la ficha informativa.
+# La caché de 24 h evita repetir estas consultas en cada actualización de la página.
+peer_progress = st.progress(0, text="Calculando referencias sectoriales del universo…")
+all_tickers = META["Ticker"].tolist()
+for peer_i, peer_ticker in enumerate(all_tickers):
+    peer_info = candidate_info.get(peer_ticker)
+    if peer_info is None:
+        peer_info = get_peer_info(peer_ticker)
+    peer_price = price_by_ticker.get(peer_ticker, np.nan)
+    peer_pe = get_usable_pe(peer_info, peer_price)
+
+    # EPS puede faltar en la ficha resumida; intentamos obtenerlo de los estados
+    # financieros ya descargados para los candidatos.
+    if (not pd.notna(peer_pe)) and peer_ticker in candidate_info:
+        match = next((x for x in fund_rows if x["Ticker"] == peer_ticker), None)
+        if match is not None:
+            # En esta versión la ficha resumida no siempre trae EPS: se mantiene
+            # como dato ausente en lugar de fabricar un múltiplo.
+            pass
+
+    peer_sector = META.loc[META["Ticker"] == peer_ticker, "Sector"].iloc[0]
+    peer_industry = peer_info.get("industry") if isinstance(peer_info, dict) else None
+    peer_rows.append({
+        "Ticker": peer_ticker,
+        "Sector": peer_sector,
+        "Industria": peer_industry,
+        "P/E peer": peer_pe
+    })
+    peer_progress.progress((peer_i + 1) / max(1, len(all_tickers)),
+                           text=f"Calculando pares: {peer_i + 1}/{len(all_tickers)}")
+peer_progress.empty()
+
+peer_df = pd.DataFrame(peer_rows)
+peer_df["P/E peer"] = pd.to_numeric(peer_df["P/E peer"], errors="coerce")
+peer_df.loc[(peer_df["P/E peer"] <= 0) | (peer_df["P/E peer"] > 500), "P/E peer"] = np.nan
+sector_stats = peer_df.groupby("Sector")["P/E peer"].agg(["median", "count"])
+industry_stats = peer_df.dropna(subset=["Industria"]).groupby("Industria")["P/E peer"].agg(["median", "count"])
+
+# Si una empresa no tiene industria informada, se usa la mediana de su sector.
+industry_by_ticker = peer_df.set_index("Ticker")["Industria"].to_dict()
 view["Industria"] = view["Ticker"].map(industry_by_ticker)
-sector_stats = view.groupby("Sector")["P/E"].agg(["median", "count"])
-industry_stats = view.dropna(subset=["Industria"]).groupby("Industria")["P/E"].agg(["median", "count"])
 view["Sector P/E mediana"] = view["Sector"].map(sector_stats["median"])
 view["Sector P/E pares"] = view["Sector"].map(sector_stats["count"])
 view["Industria P/E mediana"] = view["Industria"].map(industry_stats["median"])
@@ -559,8 +605,12 @@ use_industry = (
     & (view["Industria P/E mediana"] > 0)
     & (view["Industria P/E pares"] >= 2)
 )
-view["P/E referencia"] = np.where(use_industry, view["Industria P/E mediana"], view["Sector P/E mediana"])
-view["Pares referencia"] = np.where(use_industry, view["Industria P/E pares"], view["Sector P/E pares"])
+view["P/E referencia"] = np.where(
+    use_industry, view["Industria P/E mediana"], view["Sector P/E mediana"]
+)
+view["Pares referencia"] = np.where(
+    use_industry, view["Industria P/E pares"], view["Sector P/E pares"]
+)
 valid_pe = (
     view["P/E"].notna()
     & view["P/E referencia"].notna()
@@ -709,7 +759,7 @@ tips = [
     "Descenso desde el máximo móvil de 12 meses.", "Días calendario desde el máximo móvil.",
     "Orden por severidad de caída.", "Variación aproximada de 12 meses.",
     "Gráfica miniatura de la evolución del precio.",
-    "P/E frente a la mediana de la industria cuando hay al menos dos pares; si no, usa la mediana del sector. Si faltan datos suficientes, muestra —.",
+    "P/E frente a la mediana de la industria del universo completo; si no hay al menos dos pares, usa la mediana del sector. Si Yahoo no entrega P/E válido suficiente, muestra —.",
     "Percentil del precio respecto de sus cierres de hasta cinco años; no es P/E histórico.",
     "Puntuación heurística propia; no es una valoración intrínseca.",
     "Clasificación orientativa del score compuesto.",
@@ -718,7 +768,7 @@ tips = [
 head = "".join(f'<th title="{tips[i]}" onclick="sortTable({i})" style="cursor:pointer">{h}</th>' for i,h in enumerate(headers))
 radar_html = f"""<style>
 body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4ff}}
-.radar-wrap{{width:100%;height:720px;max-height:78vh;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b;scrollbar-color:#647d99 #101722}}
+.radar-wrap{{width:100%;height:620px;max-height:620px;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b;scrollbar-color:#647d99 #101722}}
 .radar-table{{width:2037px;min-width:2037px;table-layout:fixed;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
 .radar-table th:nth-child(1),.radar-table td:nth-child(1){{width:52px;min-width:52px}}
 .radar-table th:nth-child(2),.radar-table td:nth-child(2){{width:245px;min-width:245px;max-width:245px}}
@@ -759,7 +809,7 @@ body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4
 <script>
 function sortTable(n){{const t=document.getElementById('radarTable'),b=t.tBodies[0],rows=[...b.rows];const asc=t.dataset.col==n?t.dataset.asc!=='true':true;rows.sort((a,c)=>{{let x=a.cells[n].innerText.trim(),y=c.cells[n].innerText.trim();let nx=parseFloat(x.replace(/[^0-9.+-]/g,'')),ny=parseFloat(y.replace(/[^0-9.+-]/g,''));if(!isNaN(nx)&&!isNaN(ny))return asc?nx-ny:ny-nx;return asc?x.localeCompare(y):y.localeCompare(x)}});rows.forEach(r=>b.appendChild(r));t.dataset.col=n;t.dataset.asc=asc;}}
 </script>"""
-st.components.v1.html(radar_html, height=750, scrolling=False)
+st.components.v1.html(radar_html, height=650, scrolling=False)
 csv = view[display_cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button("⬇ Exportar radar a CSV", data=csv, file_name="blue_chip_value_radar.csv", mime="text/csv")
 
@@ -868,4 +918,5 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.caption(f"Blue Chip Value Scanner · {BUILD_VERSION} · actualización automática cada 5 minutos si Yahoo responde · herramienta educativa, no asesoría financiera.")
+
 
