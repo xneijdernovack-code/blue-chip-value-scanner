@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
-BUILD_VERSION = "v2.3 · 06 NOV 2026"
+BUILD_VERSION = "v2.2 · 06 NOV 2026"
 
 st.set_page_config(
     page_title="Blue Chip Value Scanner",
@@ -300,6 +300,29 @@ def field(df, names, col=0):
                 pass
     return np.nan
 
+def get_usable_pe(info, price):
+    """Obtiene un P/E positivo utilizable; evita NaN cuando Yahoo omite trailingPE."""
+    candidates = [
+        info.get("trailingPE"),
+        info.get("forwardPE"),
+    ]
+    eps = info.get("trailingEps")
+    try:
+        eps = float(eps)
+        if eps > 0 and pd.notna(price) and float(price) > 0:
+            candidates.append(float(price) / eps)
+    except (TypeError, ValueError):
+        pass
+    for value in candidates:
+        try:
+            value = float(value)
+            if pd.notna(value) and value > 0 and value < 500:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return np.nan
+
+
 def build_quality(info, bs, inc, cf):
     checks = []
     roa = info.get("returnOnAssets")
@@ -453,7 +476,9 @@ for i, (_, row) in enumerate(candidates.iterrows()):
     sym = row["Ticker"]
     try:
         info, bs, inc, cf = get_fundamentals(sym)
-        pe = info.get("trailingPE")
+        # Yahoo a veces no entrega trailingPE aunque sí tenga EPS o forwardPE.
+        # Usamos alternativas válidas antes de marcar el dato como no disponible.
+        pe = get_usable_pe(info, row.get("Precio", np.nan))
         fcf = info.get("freeCashflow")
         mcap = info.get("marketCap")
         fcf_yield = (fcf/mcap*100) if fcf is not None and mcap and mcap > 0 else np.nan
@@ -469,13 +494,27 @@ fund = pd.DataFrame(fund_rows)
 if fund.empty:
     fund = pd.DataFrame(columns=["Ticker","P/E","FCF Yield","F-score","F-count","Market Cap","Info"])
 view = candidates.merge(fund.drop(columns=["Info"], errors="ignore"), on="Ticker", how="left")
-# Sector median P/E; comparisons are only shown if there are enough valid peers.
-sector_pe = view.groupby("Sector")["P/E"].transform("median")
-view["vs Ind."] = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
-                            (view["P/E"]/sector_pe-1)*100, np.nan)
+# Comparación de valoración: P/E de la empresa frente a la mediana de su sector.
+# Se requieren al menos 2 empresas con P/E positivo en el sector; si no, no se inventa un dato.
+view["P/E"] = pd.to_numeric(view["P/E"], errors="coerce")
+view.loc[(view["P/E"] <= 0) | (view["P/E"] > 500), "P/E"] = np.nan
+sector_stats = view.groupby("Sector")["P/E"].agg(["median", "count"])
+view["Sector P/E mediana"] = view["Sector"].map(sector_stats["median"])
+view["Sector P/E pares"] = view["Sector"].map(sector_stats["count"])
+valid_pe = (
+    view["P/E"].notna()
+    & view["Sector P/E mediana"].notna()
+    & (view["Sector P/E mediana"] > 0)
+    & (view["Sector P/E pares"] >= 2)
+)
+view["vs Ind."] = np.where(
+    valid_pe,
+    (view["P/E"] / view["Sector P/E mediana"] - 1) * 100,
+    np.nan
+)
 # A transparent relative score: drawdown + discount to sector + F-score + FCF yield.
-pe_discount = np.where(view["P/E"].notna() & sector_pe.notna() & (sector_pe>0),
-                       np.clip((sector_pe-view["P/E"])/sector_pe*100,-100,100), 0)
+pe_discount = np.where(valid_pe,
+                       np.clip((view["Sector P/E mediana"]-view["P/E"])/view["Sector P/E mediana"]*100,-100,100), 0)
 quality_norm = view["F-score"].fillna(4)/8*100
 fcf_norm = view["FCF Yield"].clip(-10,20).fillna(0)
 view["Valor"] = (0.45*(100+view["Caida"].clip(-80,0))/80*100 +
@@ -554,33 +593,6 @@ def _sparkline(values, color="#39c98b"):
 
 verdict_class = {"barata de verdad":"verdict-cheap", "algo barata":"verdict-some", "en precio":"verdict-fair", "cara (cayó, pero cara)":"verdict-expensive"}
 quality_class = {"sana":"quality-healthy", "aceptable":"quality-acceptable", "frágil":"quality-fragile", "posible trampa":"quality-trap", "sin datos":"quality-fragile"}
-def _safe_float(value, default=0.0):
-    """Convierte valores numéricos aunque lleguen formateados como '$338.38' o '-12.5%'."""
-    if value is None:
-        return default
-    try:
-        if pd.isna(value):
-            return default
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, (int, float, np.number)):
-        return float(value)
-    cleaned = str(value).strip()
-    if cleaned in ("", "—", "-", "N/D", "Sin dato"):
-        return default
-    cleaned = cleaned.replace("$", "").replace(",", "").replace("%", "")
-    cleaned = cleaned.replace("−", "-").replace(" ", "")
-    # Admite formatos contables como (123.45).
-    if cleaned.startswith("(") and cleaned.endswith(")"):
-        cleaned = "-" + cleaned[1:-1]
-    try:
-        return float(cleaned)
-    except (TypeError, ValueError):
-        return default
-
-def _safe_int(value, default=0):
-    return int(round(_safe_float(value, default)))
-
 for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
     ticker = str(rr.get("Ticker", ""))
     company = str(rr.get("Empresa", ""))
@@ -606,15 +618,15 @@ for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
         f'<td><div class="radar-company">{logo_html}<div class="radar-company-text"><div class="radar-ticker">{_html.escape(ticker)}</div><div class="radar-name">{_html.escape(company)}</div></div></div></td>',
         f'<td><b>#{int(rr.get("Rank S&P", 0))}</b></td>',
         f'<td>{_html.escape(str(rr.get("Sector", "")))}</td>',
-        f'<td>${_safe_float(rr.get("Precio", 0)):,.2f}</td>',
-        f'<td><span class="drop"><span class="num-sign">{ "−" if _safe_float(rr.get("Caida", 0)) < 0 else "+" if _safe_float(rr.get("Caida", 0)) > 0 else "" }</span><span>{abs(_safe_float(rr.get("Caida", 0))):.1f}%</span></span></td>',
-        f'<td>{_safe_int(rr.get("Dias", 0))} d</td>',
-        f'<td>{_safe_int(rr.get("Sev.", 0))}</td>',
-        f'<td><span class="signed-number"><span class="num-sign">{ "−" if _safe_float(rr.get("1 año", 0)) < 0 else "+" if _safe_float(rr.get("1 año", 0)) > 0 else "" }</span><span>{abs(_safe_float(rr.get("1 año", 0))):.1f}%</span></span></td>',
+        f'<td>${float(rr.get("Precio", 0)):,.2f}</td>',
+        f'<td><span class="drop">{float(rr.get("Caida", 0)):.1f}%</span></td>',
+        f'<td>{int(rr.get("Dias", 0))} d</td>',
+        f'<td>{int(rr.get("Sev.", 0))}</td>',
+        f'<td>{float(rr.get("1 año", 0)):+.1f}%</td>',
         f'<td>{_sparkline(hist)}</td>',
-        f'<td><span class="signed-number"><span class="num-sign">{ "−" if _safe_float(rr.get("vs Ind.", np.nan), np.nan) < 0 else "+" if _safe_float(rr.get("vs Ind.", np.nan), np.nan) > 0 else "" }</span><span>{abs(_safe_float(rr.get("vs Ind.", np.nan), np.nan)):.0f}%</span></span></td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
+        f'<td>{float(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
         f'<td title="{hist_tip}"><b>{_html.escape(hist_value)}</b></td>',
-        f'<td><b class="signed-number"><span class="num-sign">{ "−" if _safe_float(rr.get("Valor", 0)) < 0 else "+" if _safe_float(rr.get("Valor", 0)) > 0 else "" }</span><span>{abs(_safe_float(rr.get("Valor", 0))):.2f}</span></b></td>',
+        f'<td><b>{float(rr.get("Valor", 0)):+.2f}</b></td>',
         f'<td><span class="radar-pill {v_class}" title="Veredicto orientativo del score; no es una recomendación de compra.">{_html.escape(v_label)}</span></td>',
         f'<td><span class="radar-pill {q_class}" title="{_html.escape(tip_quality)}">{_html.escape(q_label)}</span></td>',
     ]
@@ -628,7 +640,7 @@ tips = [
     "Descenso desde el máximo móvil de 12 meses.", "Días calendario desde el máximo móvil.",
     "Orden por severidad de caída.", "Variación aproximada de 12 meses.",
     "Gráfica miniatura de la evolución del precio.",
-    "P/E frente a la mediana sectorial de los candidatos con datos.",
+    "P/E de la empresa frente a la mediana sectorial. Requiere al menos dos empresas con P/E válido; si faltan datos se muestra —.",
     "Percentil del precio respecto de sus cierres de hasta cinco años; no es P/E histórico.",
     "Puntuación heurística propia; no es una valoración intrínseca.",
     "Clasificación orientativa del score compuesto.",
@@ -638,24 +650,7 @@ head = "".join(f'<th title="{tips[i]}" onclick="sortTable({i})" style="cursor:po
 radar_html = f"""<style>
 body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4ff}}
 .radar-wrap{{width:100%;height:720px;max-height:78vh;overflow:auto;border:1px solid rgba(180,210,235,.22);border-radius:14px;background:#0d121b;scrollbar-color:#647d99 #101722}}
-.radar-table{{width:1900px;min-width:1900px;table-layout:fixed;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
-.radar-table th:nth-child(1),.radar-table td:nth-child(1){{width:52px;min-width:52px}}
-.radar-table th:nth-child(2),.radar-table td:nth-child(2){{width:245px;min-width:245px;max-width:245px}}
-.radar-table th:nth-child(3),.radar-table td:nth-child(3){{width:90px;min-width:90px}}
-.radar-table th:nth-child(4),.radar-table td:nth-child(4){{width:170px;min-width:170px}}
-.radar-table th:nth-child(5),.radar-table td:nth-child(5){{width:110px;min-width:110px}}
-.radar-table th:nth-child(6),.radar-table td:nth-child(6){{width:105px;min-width:105px}}
-.radar-table th:nth-child(7),.radar-table td:nth-child(7){{width:85px;min-width:85px}}
-.radar-table th:nth-child(8),.radar-table td:nth-child(8){{width:75px;min-width:75px}}
-.radar-table th:nth-child(9),.radar-table td:nth-child(9){{width:100px;min-width:100px}}
-.radar-table th:nth-child(10),.radar-table td:nth-child(10){{width:210px;min-width:210px}}
-.radar-table th:nth-child(11),.radar-table td:nth-child(11){{width:120px;min-width:120px}}
-.radar-table th:nth-child(12),.radar-table td:nth-child(12){{width:110px;min-width:110px}}
-.radar-table th:nth-child(13),.radar-table td:nth-child(13){{width:100px;min-width:100px}}
-.radar-table th:nth-child(14),.radar-table td:nth-child(14){{width:150px;min-width:150px}}
-.radar-table th:nth-child(15),.radar-table td:nth-child(15){{width:180px;min-width:180px}}
-.radar-table td{{overflow:hidden;text-overflow:ellipsis}}
-.radar-table td:nth-child(4),.radar-table th:nth-child(4){{white-space:normal;line-height:1.25}}
+.radar-table{{width:100%;min-width:1650px;table-layout:fixed;border-collapse:separate;border-spacing:0;color:#edf4ff;font-size:14px}}
 .radar-table th{{position:sticky;top:0;z-index:5;background:#172332;color:#f4f7fb;text-align:left;padding:16px 12px;border-bottom:1px solid #344354;white-space:nowrap;font-weight:800}}
 .radar-table td{{padding:16px 12px;border-bottom:1px solid rgba(160,185,210,.15);height:88px;white-space:nowrap;vertical-align:middle}}
 .radar-table tbody tr:nth-child(even){{background:rgba(225,240,255,.035)}}.radar-table tbody tr:hover{{background:rgba(105,184,226,.13)}}
@@ -665,13 +660,10 @@ body{{margin:0;background:#0d121b;font-family:Inter,Arial,sans-serif;color:#edf4
 .radar-company{{display:flex;align-items:center;gap:11px;min-width:0}}.radar-logo{{width:36px;height:36px;min-width:36px;border-radius:50%;background:#eef4fb;object-fit:contain;padding:3px}}
 .radar-monogram{{width:36px;height:36px;min-width:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(140deg,#406b92,#664a8d);font-size:12px;font-weight:800;color:white}}
 .radar-company-text{{min-width:0;white-space:normal}}.radar-ticker{{font-size:15px;font-weight:800;color:#8fc8f5;line-height:1.3}}.radar-name{{font-size:12px;color:#d3dce8;margin-top:4px;line-height:1.25}}
-.drop{{display:inline-flex;align-items:center;gap:7px;background:#8f2e2b;color:white;border-radius:9px;padding:6px 11px;font-weight:700;white-space:nowrap}}
-.signed-number{{display:inline-flex;align-items:baseline;gap:6px;white-space:nowrap;font-variant-numeric:tabular-nums}}
-.num-sign{{display:inline-block;min-width:9px;text-align:center;font-weight:800}}
-.radar-table td:nth-child(11),.radar-table td:nth-child(12),.radar-table td:nth-child(13){{text-align:center}}
+.drop{{display:inline-block;background:#8f2e2b;color:white;border-radius:9px;padding:6px 10px;font-weight:700}}
 .radar-pill{{display:inline-block;padding:6px 11px;border-radius:9px;font-size:12px;font-weight:800;white-space:nowrap}}
 .verdict-cheap,.quality-healthy{{background:#d9f3df;color:#24623b}}.verdict-some,.quality-acceptable{{background:#dce8f4;color:#315a7b}}.verdict-fair{{background:#e7e9ed;color:#555f6a}}.verdict-expensive,.quality-trap{{background:#f5dce5;color:#87334d}}.quality-fragile{{background:#f8e8c9;color:#80551e}}
-.spark{{width:190px;height:58px;display:block;max-width:100%}}
+.spark{{width:245px;height:58px;display:block}}
 </style>
 <div class="radar-wrap"><table class="radar-table" id="radarTable"><thead><tr>{head}</tr></thead><tbody>{''.join(html_rows)}</tbody></table></div>
 <script>
@@ -784,5 +776,4 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.caption(f"Blue Chip Value Scanner · {BUILD_VERSION} · actualización automática cada 5 minutos si Yahoo responde · herramienta educativa, no asesoría financiera.")
-
 
