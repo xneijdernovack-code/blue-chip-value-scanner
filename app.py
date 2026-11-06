@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
-BUILD_VERSION = "v2.2 · 06 NOV 2026"
+BUILD_VERSION = "v2.8 · 06 NOV 2026"
 
 st.set_page_config(
     page_title="Blue Chip Value Scanner",
@@ -272,9 +272,22 @@ def download_one_history(ticker, period="5y"):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_peer_info(ticker):
-    """Consulta solo la ficha de Yahoo para calcular múltiplos de pares del universo completo."""
+    """Consulta ficha y cotización rápida de Yahoo para construir múltiplos de pares."""
     try:
-        return yf.Ticker(ticker).get_info() or {}
+        t = yf.Ticker(ticker)
+        info = t.get_info() or {}
+        try:
+            fast = t.fast_info
+            for source_key, target_key in (
+                ("lastPrice", "currentPrice"),
+                ("marketCap", "marketCap"),
+            ):
+                value = fast.get(source_key)
+                if value is not None and info.get(target_key) is None:
+                    info[target_key] = value
+        except Exception:
+            pass
+        return info
     except Exception:
         return {}
 
@@ -344,29 +357,34 @@ def field(df, names, col=0):
     return np.nan
 
 def get_usable_pe(info, price):
-    """Obtiene un P/E positivo utilizable; evita NaN cuando Yahoo omite trailingPE."""
-    candidates = [
-        info.get("trailingPE"),
-        info.get("forwardPE"),
-    ]
-    # Yahoo puede omitir los múltiplos ya calculados, pero entregar EPS.
-    # Probamos EPS trailing y forward como alternativas transparentes.
+    """Obtiene P/E trailing/forward o lo aproxima con market cap / beneficio neto TTM."""
+    info = info or {}
+    candidates = [info.get("trailingPE"), info.get("forwardPE")]
+
+    # EPS publicado: preferimos el precio de mercado válido y luego el precio de la ficha.
+    quote_price = safe_number(price, np.nan)
+    if not pd.notna(quote_price) or quote_price <= 0:
+        quote_price = safe_number(
+            info.get("currentPrice", info.get("regularMarketPrice")), np.nan
+        )
     for eps_key in ("trailingEps", "forwardEps"):
-        eps = info.get(eps_key)
-        try:
-            eps = float(eps)
-            numeric_price = safe_number(price, 0)
-            if eps > 0 and pd.notna(numeric_price) and numeric_price > 0:
-                candidates.append(numeric_price / eps)
-        except (TypeError, ValueError):
-            continue
+        eps = safe_number(info.get(eps_key), np.nan)
+        if pd.notna(eps) and eps > 0 and pd.notna(quote_price) and quote_price > 0:
+            candidates.append(quote_price / eps)
+
+    # Fallback equivalente a P/E trailing: capitalización bursátil / beneficio neto TTM.
+    market_cap = safe_number(info.get("marketCap"), np.nan)
+    net_income = safe_number(
+        info.get("netIncomeToCommon", info.get("netIncome")), np.nan
+    )
+    if (pd.notna(market_cap) and market_cap > 0
+            and pd.notna(net_income) and net_income > 0):
+        candidates.append(market_cap / net_income)
+
     for value in candidates:
-        try:
-            value = float(value)
-            if pd.notna(value) and value > 0 and value < 500:
-                return value
-        except (TypeError, ValueError):
-            continue
+        value = safe_number(value, np.nan)
+        if pd.notna(value) and 0 < value < 500:
+            return float(value)
     return np.nan
 
 
@@ -621,6 +639,13 @@ view["vs Ind."] = np.where(
     valid_pe,
     (view["P/E"] / view["P/E referencia"] - 1) * 100,
     np.nan
+)
+peer_valid_count = int(peer_df["P/E peer"].notna().sum())
+peer_total_count = int(len(peer_df))
+st.caption(
+    f"Comparación sectorial: {peer_valid_count}/{peer_total_count} compañías del universo "
+    "tienen un P/E utilizable. Si Yahoo Finance no publica beneficio/EPS válido, el dato "
+    "se deja como no disponible (—), en lugar de estimarlo sin respaldo."
 )
 # A transparent relative score: drawdown + discount to sector + F-score + FCF yield.
 pe_discount = np.where(valid_pe,
@@ -910,7 +935,7 @@ st.markdown("""
  <h3>Metodología y límites</h3>
  <ul>
  <li><b>Caída:</b> último cierre ajustado frente al máximo de los últimos 252 cierres disponibles. “Días” es el tiempo calendario desde ese máximo.</li>
- <li><b>vs Ind.:</b> P/E trailing de la empresa frente a la mediana de P/E del sector dentro de los candidatos que devolvieron datos; no es una comparación completa con todos los pares.</li>
+ <li><b>vs Ind.:</b> P/E trailing o forward de la empresa frente a la mediana de industria/sector del universo completo. Usa múltiplos publicados por Yahoo o market cap / beneficio neto cuando ambos están disponibles.</li>
  <li><b>Valor:</b> puntuación heurística propia que combina caída, descuento sectorial, calidad fundamental y FCF yield. No es una recomendación ni un modelo validado.</li>
  <li><b>Calidad:</b> proxy de ocho comprobaciones disponibles; no equivale al Piotroski F-Score oficial. La valoración histórica de cinco años no se calcula en esta versión porque no se dispone de series históricas consistentes de fundamentales.</li>
  <li><b>Sesgo de supervivencia:</b> el universo contiene compañías vigentes; no incluye empresas que salieron del índice o quebraron.</li>
@@ -918,5 +943,4 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.caption(f"Blue Chip Value Scanner · {BUILD_VERSION} · actualización automática cada 5 minutos si Yahoo responde · herramienta educativa, no asesoría financiera.")
-
 
