@@ -289,6 +289,26 @@ def get_fundamentals(ticker):
         cf = pd.DataFrame()
     return info, bs, inc, cf
 
+
+def safe_number(value, default=np.nan):
+    """Convierte valores numéricos aunque lleguen como '$343.77', '1,234.50' o '-12.5%'."""
+    if value is None:
+        return default
+    try:
+        if isinstance(value, (int, float, np.number)):
+            return float(value) if pd.notna(value) else default
+        raw = str(value).strip()
+        if not raw or raw.lower() in {"nan", "none", "n/a", "—", "-"}:
+            return default
+        is_percent = "%" in raw
+        raw = raw.replace("$", "").replace(",", "").replace("%", "")
+        raw = raw.replace(" ", "").replace("−", "-").replace("+", "")
+        number = float(raw)
+        # Los porcentajes de la tabla se guardan como puntos porcentuales (p. ej. -12.5).
+        return number
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 def field(df, names, col=0):
     if df is None or df.empty:
         return np.nan
@@ -309,8 +329,8 @@ def get_usable_pe(info, price):
     eps = info.get("trailingEps")
     try:
         eps = float(eps)
-        if eps > 0 and pd.notna(price) and float(price) > 0:
-            candidates.append(float(price) / eps)
+        if eps > 0 and pd.notna(price) and safe_number(price, 0) > 0:
+            candidates.append(safe_number(price, 0) / eps)
     except (TypeError, ValueError):
         pass
     for value in candidates:
@@ -618,15 +638,15 @@ for row_number, (_, rr) in enumerate(view.iterrows(), start=1):
         f'<td><div class="radar-company">{logo_html}<div class="radar-company-text"><div class="radar-ticker">{_html.escape(ticker)}</div><div class="radar-name">{_html.escape(company)}</div></div></div></td>',
         f'<td><b>#{int(rr.get("Rank S&P", 0))}</b></td>',
         f'<td>{_html.escape(str(rr.get("Sector", "")))}</td>',
-        f'<td>${float(rr.get("Precio", 0)):,.2f}</td>',
-        f'<td><span class="drop">{float(rr.get("Caida", 0)):.1f}%</span></td>',
+        f'<td>${safe_number(rr.get("Precio", 0), 0):,.2f}</td>',
+        f'<td><span class="drop">{safe_number(rr.get("Caida", 0), 0):.1f}%</span></td>',
         f'<td>{int(rr.get("Dias", 0))} d</td>',
         f'<td>{int(rr.get("Sev.", 0))}</td>',
-        f'<td>{float(rr.get("1 año", 0)):+.1f}%</td>',
+        f'<td>{safe_number(rr.get("1 año", 0), 0):+.1f}%</td>',
         f'<td>{_sparkline(hist)}</td>',
-        f'<td>{float(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
+        f'<td>{safe_number(rr.get("vs Ind.", np.nan)):+.0f}%</td>' if pd.notna(rr.get("vs Ind.", np.nan)) else '<td>—</td>',
         f'<td title="{hist_tip}"><b>{_html.escape(hist_value)}</b></td>',
-        f'<td><b>{float(rr.get("Valor", 0)):+.2f}</b></td>',
+        f'<td><b>{safe_number(rr.get("Valor", 0), 0):+.2f}</b></td>',
         f'<td><span class="radar-pill {v_class}" title="Veredicto orientativo del score; no es una recomendación de compra.">{_html.escape(v_label)}</span></td>',
         f'<td><span class="radar-pill {q_class}" title="{_html.escape(tip_quality)}">{_html.escape(q_label)}</span></td>',
     ]
@@ -713,8 +733,8 @@ if symbols:
             raw_info = {}
             r["P/E"] = np.nan; r["FCF Yield"] = np.nan
     a,b,c,d = st.columns(4)
-    a.metric("Precio", f"${float(selected_row['Precio']):,.2f}")
-    b.metric("Caída desde pico", f"{float(selected_row['Caida']):.1f}%")
+    a.metric("Precio", f"${safe_number(selected_row['Precio'], 0):,.2f}")
+    b.metric("Caída desde pico", f"{safe_number(selected_row['Caida'], 0):.1f}%")
     c.metric("P/E trailing", f"{r['P/E']:.1f}x" if pd.notna(r.get("P/E", np.nan)) else "N/D")
     d.metric("FCF yield", f"{r['FCF Yield']:.1f}%" if pd.notna(r.get("FCF Yield", np.nan)) else "N/D")
     # Plot 1-year close series
@@ -734,10 +754,12 @@ if symbols:
     with st.expander("Ver datos fundamentales disponibles", expanded=False):
         def _fmt_money(v):
             if v is None or pd.isna(v): return "Sin dato"
-            v=float(v); a=abs(v)
+            v=safe_number(v)
+            if pd.isna(v): return "Sin dato"
+            a=abs(v)
             return (f"${v/1e12:.2f} T" if a>=1e12 else f"${v/1e9:.2f} B" if a>=1e9 else f"${v/1e6:.1f} M" if a>=1e6 else f"${v:,.2f}")
-        def _fmt_pct(v): return "Sin dato" if v is None or pd.isna(v) else f"{float(v)*100:.1f}%"
-        def _fmt_num(v, suffix=""): return "Sin dato" if v is None or pd.isna(v) else f"{float(v):,.2f}{suffix}"
+        def _fmt_pct(v): return "Sin dato" if v is None or pd.isna(v) else f"{safe_number(v)*100:.1f}%"
+        def _fmt_num(v, suffix=""): return "Sin dato" if v is None or pd.isna(v) else f"{safe_number(v):,.2f}{suffix}"
         fundamentals = [
             ("Sector", raw_info.get("sector") or r.get("Sector","Sin dato")),
             ("Industria", raw_info.get("industry") or "Sin dato"),
